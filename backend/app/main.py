@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import uuid
+import zipfile
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel, Field
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_ROWS = 100_000
+MAX_COLUMNS = 200
+MAX_CELLS = 2_000_000
+MAX_UNCOMPRESSED_XLSX_BYTES = 200 * 1024 * 1024
 MAX_PAGE_SIZE = 200
 
 
@@ -55,11 +60,24 @@ def read_spreadsheet(
                 text = content.decode("cp1252")
             except UnicodeDecodeError as exc:
                 raise ValueError("Could not decode this CSV file") from exc
-        rows = list(csv.reader(io.StringIO(text, newline="")))
+        rows = []
+        for row in csv.reader(io.StringIO(text, newline="")):
+            if len(rows) >= MAX_ROWS + 1:
+                raise ValueError(f"Files may contain at most {MAX_ROWS:,} records")
+            if len(row) > MAX_COLUMNS:
+                raise ValueError(f"Files may contain at most {MAX_COLUMNS} columns")
+            if len(rows) * max(1, len(row)) > MAX_CELLS:
+                raise ValueError("This file contains too many cells to import safely")
+            rows.append(row)
         available_sheets: list[str] = []
     elif extension == ".xlsx":
         try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                if sum(item.file_size for item in archive.infolist()) > MAX_UNCOMPRESSED_XLSX_BYTES:
+                    raise ValueError("This Excel file expands beyond the supported size")
             workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        except ValueError:
+            raise
         except Exception as exc:
             raise ValueError("This Excel file is malformed or cannot be opened") from exc
         available_sheets = workbook.sheetnames
@@ -67,7 +85,21 @@ def read_spreadsheet(
         if not selected or selected not in available_sheets:
             raise ValueError("Select a worksheet that exists in this workbook")
         worksheet = workbook[selected]
-        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        if worksheet.max_row and worksheet.max_row > MAX_ROWS + 1:
+            workbook.close()
+            raise ValueError(f"Files may contain at most {MAX_ROWS:,} records")
+        if worksheet.max_column and worksheet.max_column > MAX_COLUMNS:
+            workbook.close()
+            raise ValueError(f"Files may contain at most {MAX_COLUMNS} columns")
+        rows = []
+        for row in worksheet.iter_rows(values_only=True):
+            if len(rows) >= MAX_ROWS + 1:
+                workbook.close()
+                raise ValueError(f"Files may contain at most {MAX_ROWS:,} records")
+            if len(rows) * max(1, len(row)) > MAX_CELLS:
+                workbook.close()
+                raise ValueError("This file contains too many cells to import safely")
+            rows.append(list(row))
         workbook.close()
     else:
         raise ValueError("Only CSV and XLSX files are supported")
@@ -156,11 +188,15 @@ def _compile_filter(
     if "conditions" in node:
         conditions = node["conditions"]
         logic = str(node.get("logic", "and")).casefold()
-        if logic not in {"and", "or"} or not isinstance(conditions, list):
+        if (
+            logic not in {"and", "or"}
+            or not isinstance(conditions, list)
+            or len(conditions) > 50
+        ):
             raise HTTPException(status_code=422, detail="Invalid filter group")
         compiled = [
             _compile_filter(dataset, condition, depth + 1)
-            for condition in conditions[:50]
+            for condition in conditions
         ]
         compiled = [(sql, params) for sql, params in compiled if sql]
         if not compiled:

@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local DataBNB data and configuration
+data/*.duckdb
+data/*.duckdb.wal
+data/uploads/
+.env
+.env.*
+!.env.example
+
+# Node and Vite
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo

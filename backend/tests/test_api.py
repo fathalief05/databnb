@@ -1,9 +1,11 @@
 import csv
 import io
 import json
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 from backend.app.main import create_app
 
@@ -39,6 +41,42 @@ def test_preview_and_import_normalize_duplicate_headers_and_persist(tmp_path: Pa
     reloaded = TestClient(create_app(tmp_path / "test.duckdb"))
     assert reloaded.get("/api/datasets").json()[0]["id"] == dataset["id"]
     assert reloaded.get(f"/api/datasets/{dataset['id']}/records").json()["total"] == 3
+
+
+def test_xlsx_preview_and_import_select_a_worksheet(tmp_path: Path) -> None:
+    workbook = Workbook()
+    workbook.active.title = "First"
+    workbook.active.append(["ignored"])
+    second = workbook.create_sheet("Inventory")
+    second.append(["Item", "In stock"])
+    second.append(["Desk", 7])
+    file_content = BytesIO()
+    workbook.save(file_content)
+    client = make_client(tmp_path)
+
+    preview = client.post(
+        "/api/import/preview",
+        files={"file": ("inventory.xlsx", file_content.getvalue(), "application/octet-stream")},
+        data={"sheet_name": "Inventory"},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["sheets"] == ["First", "Inventory"]
+    assert preview.json()["preview"] == [{"Item": "Desk", "In stock": 7}]
+
+    imported = client.post(
+        "/api/datasets/import",
+        files={"file": ("inventory.xlsx", file_content.getvalue(), "application/octet-stream")},
+        data={"name": "Inventory", "sheet_name": "Inventory"},
+    )
+    assert imported.status_code == 201, imported.text
+    assert client.get(f"/api/datasets/{imported.json()['id']}/records").json()["records"][0]["In stock"] == 7
+
+    bad_sheet = client.post(
+        "/api/import/preview",
+        files={"file": ("inventory.xlsx", file_content.getvalue(), "application/octet-stream")},
+        data={"sheet_name": "Missing"},
+    )
+    assert bad_sheet.status_code == 422
 
 
 def test_search_nested_filters_sort_and_pagination_use_full_dataset(tmp_path: Path) -> None:
@@ -121,6 +159,16 @@ def test_record_crud_configurations_and_export_scope(tmp_path: Path) -> None:
     assert client.get(
         f"/api/datasets/{dataset['id']}/configurations"
     ).json()[0]["id"] == configuration_id
+    renamed = client.patch(
+        f"/api/datasets/{dataset['id']}/configurations/{configuration_id}",
+        json={
+            "name": "High value",
+            "description": "Renamed",
+            "definition": {"column": "amount", "operator": "greater_than", "value": 50},
+        },
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "High value"
 
     exported = client.post(
         f"/api/datasets/{dataset['id']}/export",
