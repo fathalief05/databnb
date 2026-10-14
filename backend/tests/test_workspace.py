@@ -194,3 +194,21 @@ def test_upload_filename_is_stored_without_client_path(client):
     )
     assert response.status_code == 200, response.text
     assert client.get("/api/datasets").json()[0]["source_filename"] == "sample.csv"
+
+
+def test_cors_allows_local_development_ports_and_rejects_unrelated_origins(client):
+    preflight = client.options(
+        "/api/imports",
+        headers={
+            "Origin": "http://localhost:5174",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "http://localhost:5174"
+    assert "POST" in preflight.headers["access-control-allow-methods"]
+
+    blocked = client.get("/api/health", headers={"Origin": "https://untrusted.example"})
+    assert blocked.status_code == 200
+    assert "access-control-allow-origin" not in blocked.headers

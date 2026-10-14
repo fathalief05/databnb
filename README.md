@@ -60,6 +60,8 @@ npm --prefix frontend run dev
 
 Open the local URL printed by Vite (normally `http://localhost:5173`). The API is available at `http://localhost:8000/api`; interactive API documentation is at `http://localhost:8000/docs`.
 
+The API allows browser requests from `localhost` and `127.0.0.1` on local development ports. If you use a different trusted frontend host, set `DATABNB_CORS_ORIGINS` to a comma-separated list of exact origins before starting FastAPI (for example, `https://databnb.example`). CORS is not enabled for arbitrary origins.
+
 ## Development and verification
 
 Run backend tests from the repository root:
