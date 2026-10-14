@@ -1,4 +1,4 @@
-export type Column = { name: string; type: 'VARCHAR' | 'BIGINT' | 'DOUBLE' | 'BOOLEAN' }
+export type Column = { name: string; type: 'VARCHAR' | 'BIGINT' | 'DOUBLE' | 'BOOLEAN' | 'DATE' | 'TIMESTAMP' }
 export type Dataset = {
   id: string
   name: string
@@ -105,6 +105,8 @@ export const api = {
     }),
   deleteConfiguration: (datasetId: string, id: string) =>
     request<void>(`/datasets/${datasetId}/configurations/${id}`, { method: 'DELETE' }),
+  deleteDataset: (datasetId: string) =>
+    request<void>(`/datasets/${datasetId}`, { method: 'DELETE' }),
   export: (datasetId: string, format: 'csv' | 'xlsx', search: string, filters: FilterGroup | null, columns: string[]) =>
     fetch(`${baseUrl}/datasets/${datasetId}/export`, {
       method: 'POST',

@@ -4,14 +4,14 @@ DataBNB is a local-first workspace for importing and exploring structured data. 
 
 ## Current features
 
-- CSV and XLSX preview and import, including workbook worksheet selection, duplicate-header normalization, UTF-8/Windows-1252 CSV decoding, and basic type inference.
+- CSV and XLSX preview and import, including workbook worksheet selection, duplicate-header normalization, UTF-8/Windows-1252 CSV decoding, and basic type inference for text, numbers, booleans, and ISO dates.
 - DuckDB persistence, stable dataset and record IDs, dataset metadata, and an import limit of 25 MB, 100,000 rows, 200 columns, and 2,000,000 cells.
-- Server-side search, sorting, pagination, nested AND/OR filter definitions, and safe CSV/XLSX exports of all matching rows and selected visible columns.
+- Server-side search, sorting, pagination, nested AND/OR filter definitions, text/numeric/date/boolean comparisons, and safe CSV/XLSX exports of all matching rows and selected visible columns.
 - Record inspection, creation, editing, and deletion.
-- Saved filter, table-view, and record-detail configurations. Filter and table views support update, save-as-new, and delete. Table views preserve visible columns and sort order. Detail views allow field selection, labels, and a one- or two-column presentation.
+- Saved filter, table-view, and record-detail configurations. Filter and table views support update, save-as-new, and delete. Table views preserve visible columns, their order, and sort order. Detail views allow field selection/reordering, labels, and a one- or two-column presentation. The selected dataset and saved views are remembered in the local browser.
 - Responsive React/TypeScript workspace with keyboard-focusable controls and loading, empty, and error states.
 
-Spreadsheet imports are local copies. Database/API connectors, joins, date-relative filters, nested filter-group editing in the UI, drag-and-drop column ordering, concurrent multi-user writes, and advanced sectioned detail layouts are not implemented.
+Spreadsheet imports are local copies. Database/API connectors, joins, date-relative filters, nested filter-group editing in the UI, column resizing, concurrent multi-user writes, and advanced multi-section detail layouts are not implemented.
 
 ## Architecture
 

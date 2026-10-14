@@ -14,6 +14,9 @@ function showValue(value: unknown) {
 function filterOperators(column?: Column) {
   const general = [['is_null', 'Is null'], ['is_not_null', 'Is not null']]
   if (column?.type === 'BOOLEAN') return [['true', 'Is true'], ['false', 'Is false'], ...general]
+  if (column?.type === 'DATE' || column?.type === 'TIMESTAMP') {
+    return [['on', 'On'], ['before', 'Before'], ['after', 'After'], ['between', 'Between'], ...general]
+  }
   if (column?.type === 'BIGINT' || column?.type === 'DOUBLE') {
     return [
       ['equals', 'Equals'], ['not_equals', 'Does not equal'],
@@ -28,6 +31,11 @@ function filterOperators(column?: Column) {
     ['starts_with', 'Starts with'], ['ends_with', 'Ends with'],
     ['is_empty', 'Is empty'], ['is_not_empty', 'Is not empty'], ...general,
   ]
+}
+
+function filterColumns(node: Condition | FilterGroup): string[] {
+  if ('conditions' in node) return node.conditions.flatMap((condition) => filterColumns(condition))
+  return [node.column]
 }
 
 function App() {
@@ -62,7 +70,9 @@ function App() {
   const [sheet, setSheet] = useState('')
   const [importName, setImportName] = useState('')
   const [description, setDescription] = useState('')
-  const [configurationName, setConfigurationName] = useState('')
+  const [filterName, setFilterName] = useState('')
+  const [tableName, setTableName] = useState('')
+  const [detailName, setDetailName] = useState('')
   const [loading, setLoading] = useState(false)
   const [refresh, setRefresh] = useState(0)
   const [message, setMessage] = useState('')
@@ -74,7 +84,8 @@ function App() {
     [appliedFilter],
   )
   const shownColumns = selected
-    ? selected.columns.filter((column) => visibleColumns.includes(column.name))
+    ? visibleColumns.map((name) => selected.columns.find((column) => column.name === name))
+      .filter((column): column is Column => column !== undefined)
     : []
 
   const reportError = (reason: unknown) => {
@@ -99,16 +110,19 @@ function App() {
       setDraftConditions([])
     }
     setSelectedId(nextId)
+    if (nextId) localStorage.setItem('databnb:selected-dataset', nextId)
   }
 
   useEffect(() => {
     api.datasets().then((items) => {
       setDatasets(items)
-      const first = items[0]
+      const preferredId = localStorage.getItem('databnb:selected-dataset')
+      const first = items.find((item) => item.id === preferredId) ?? items[0]
       if (first) {
         setVisibleColumns(first.columns.map((column) => column.name))
         setDetailFields(first.columns.map((column) => column.name))
         setSelectedId(first.id)
+        localStorage.setItem('databnb:selected-dataset', first.id)
       } else {
         setLoading(false)
       }
@@ -132,21 +146,67 @@ function App() {
   }, [selectedId, page, search, sortBy, sortDirection, appliedFilter, refresh])
 
   useEffect(() => {
-    if (!selectedId) return
+    if (!selected) return
     let cancelled = false
     Promise.all([
-      api.configurations(selectedId, 'filter'),
-      api.configurations(selectedId, 'table'),
-      api.configurations(selectedId, 'detail'),
+      api.configurations(selected.id, 'filter'),
+      api.configurations(selected.id, 'table'),
+      api.configurations(selected.id, 'detail'),
     ]).then(([filters, tables, details]) => {
       if (cancelled) return
       setFilterConfigs(filters)
       setTableConfigs(tables)
       setDetailConfigs(details)
-      setActiveConfig({ filter: '', table: '', detail: '' })
+      let preferred: Partial<Record<Configuration['kind'], string>> = {}
+      try {
+        preferred = JSON.parse(localStorage.getItem(`databnb:views:${selectedId}`) ?? '{}')
+      } catch {
+        preferred = {}
+      }
+      const preferredFilter = filters.find((item) => item.id === preferred.filter)
+      const preferredTable = tables.find((item) => item.id === preferred.table)
+      const preferredDetail = details.find((item) => item.id === preferred.detail)
+      setActiveConfig({
+        filter: preferredFilter?.id ?? '',
+        table: preferredTable?.id ?? '',
+        detail: preferredDetail?.id ?? '',
+      })
+      setFilterName(preferredFilter?.name ?? '')
+      setTableName(preferredTable?.name ?? '')
+      setDetailName(preferredDetail?.name ?? '')
+      if (preferredFilter) {
+        const definition = preferredFilter.definition as unknown as FilterGroup
+        const existing = new Set(selected.columns.map((column) => column.name))
+        const missing = filterColumns(definition).filter((column) => !existing.has(column))
+        if (missing.length) reportError(new Error(`Saved filter references missing columns: ${[...new Set(missing)].join(', ')}`))
+        setAppliedFilter(definition)
+        setFilterLogic(definition.logic ?? 'and')
+        setDraftConditions(definition.conditions.filter((item): item is Condition => 'column' in item))
+      }
+      if (preferredTable) {
+        const definition = preferredTable.definition as { visibleColumns?: string[]; sortBy?: string; sortDirection?: 'asc' | 'desc' }
+        const available = new Set(selected.columns.map((column) => column.name))
+        const missing = (definition.visibleColumns ?? []).filter((column) => !available.has(column))
+        if (missing.length) reportError(new Error(`Saved table view has missing columns: ${missing.join(', ')}`))
+        setVisibleColumns((definition.visibleColumns ?? []).filter((column) => available.has(column)))
+        setSortBy(definition.sortBy ?? '')
+        setSortDirection(definition.sortDirection ?? 'asc')
+      }
+      if (preferredDetail) {
+        const definition = preferredDetail.definition as {
+          fields?: string[]; labels?: Record<string, string>; section?: string; columns?: 1 | 2
+        }
+        const available = new Set(selected.columns.map((column) => column.name))
+        const missing = (definition.fields ?? []).filter((field) => !available.has(field))
+        if (missing.length) reportError(new Error(`Saved detail view has missing fields: ${missing.join(', ')}`))
+        setDetailFields((definition.fields ?? []).filter((field) => available.has(field)))
+        setDetailLabels(definition.labels ?? {})
+        setDetailSection(definition.section ?? 'Record details')
+        setDetailColumns(definition.columns ?? 2)
+      }
     }).catch(reportError)
     return () => { cancelled = true }
-  }, [selectedId])
+  }, [selectedId, selected])
 
   const resetResult = () => {
     setPage(1)
@@ -156,6 +216,7 @@ function App() {
   const chooseDataset = (id: string) => {
     const dataset = datasets.find((item) => item.id === id)
     setSelectedId(id)
+    if (id) localStorage.setItem('databnb:selected-dataset', id)
     if (dataset) {
       setVisibleColumns(dataset.columns.map((column) => column.name))
       setDetailFields(dataset.columns.map((column) => column.name))
@@ -167,6 +228,7 @@ function App() {
     setPage(1)
     setAppliedFilter(noFilters)
     setDraftConditions([])
+    setActiveConfig({ filter: '', table: '', detail: '' })
     setResult(null)
     setRecord(null)
     setCreating(false)
@@ -221,7 +283,11 @@ function App() {
   const addCondition = () => {
     const first = selected?.columns[0]
     if (!first) return
-    setDraftConditions((items) => [...items, { column: first.name, operator: 'contains', value: '' }])
+    setDraftConditions((items) => [...items, {
+      column: first.name,
+      operator: filterOperators(first)[0][0],
+      value: '',
+    }])
   }
 
   const changeCondition = (index: number, update: Partial<Condition>) => {
@@ -245,6 +311,13 @@ function App() {
     setPage(1)
   }
 
+  const draftFilterDefinition = {
+    logic: filterLogic,
+    conditions: draftConditions.map((condition) => condition.operator === 'between'
+      ? { ...condition, value: String(condition.value ?? '').split(',').map((value) => value.trim()) }
+      : condition),
+  }
+
   const saveConfiguration = async (
     kind: Configuration['kind'],
     name: string,
@@ -261,7 +334,17 @@ function App() {
       if (kind === 'table') setTableConfigs(configs)
       if (kind === 'detail') setDetailConfigs(configs)
       setActiveConfig((current) => ({ ...current, [kind]: saved.id }))
-      setConfigurationName('')
+      const key = `databnb:views:${selected.id}`
+      let active: Partial<Record<Configuration['kind'], string>> = {}
+      try {
+        active = JSON.parse(localStorage.getItem(key) ?? '{}')
+      } catch {
+        active = {}
+      }
+      localStorage.setItem(key, JSON.stringify({ ...active, [kind]: saved.id }))
+      if (kind === 'filter') setFilterName('')
+      if (kind === 'table') setTableName('')
+      if (kind === 'detail') setDetailName('')
       setMessage(`${kind[0].toUpperCase()}${kind.slice(1)} view saved.`)
       setError('')
     } catch (reason) {
@@ -271,11 +354,51 @@ function App() {
 
   const loadConfiguration = (kind: Configuration['kind'], id: string) => {
     setActiveConfig((current) => ({ ...current, [kind]: id }))
+    if (selected) {
+      const key = `databnb:views:${selected.id}`
+      let active: Partial<Record<Configuration['kind'], string>> = {}
+      try {
+        active = JSON.parse(localStorage.getItem(key) ?? '{}')
+      } catch {
+        active = {}
+      }
+      if (id) active[kind] = id
+      else delete active[kind]
+      localStorage.setItem(key, JSON.stringify(active))
+    }
     const config = [...filterConfigs, ...tableConfigs, ...detailConfigs].find((item) => item.id === id)
-    if (!config) return
-    setConfigurationName(config.name)
+    if (!config) {
+      if (kind === 'filter') setFilterName('')
+      if (kind === 'table') setTableName('')
+      if (kind === 'detail') setDetailName('')
+      if (kind === 'filter') {
+        setAppliedFilter(noFilters)
+        setDraftConditions([])
+        setFilterLogic('and')
+        setPage(1)
+      }
+      if (kind === 'table' && selected) {
+        setVisibleColumns(selected.columns.map((column) => column.name))
+        setSortBy('')
+        setSortDirection('asc')
+        resetResult()
+      }
+      if (kind === 'detail' && selected) {
+        setDetailFields(selected.columns.map((column) => column.name))
+        setDetailLabels({})
+        setDetailSection('Record details')
+        setDetailColumns(2)
+      }
+      return
+    }
+    if (kind === 'filter') setFilterName(config.name)
+    if (kind === 'table') setTableName(config.name)
+    if (kind === 'detail') setDetailName(config.name)
     if (kind === 'filter') {
       const definition = config.definition as unknown as FilterGroup
+      const available = new Set(selected?.columns.map((column) => column.name))
+      const missing = filterColumns(definition).filter((column) => !available?.has(column))
+      if (missing.length) reportError(new Error(`Saved filter references missing columns: ${[...new Set(missing)].join(', ')}`))
       setAppliedFilter(definition)
       setFilterLogic(definition.logic ?? 'and')
       setDraftConditions(definition.conditions.filter((item): item is Condition => 'column' in item))
@@ -284,6 +407,8 @@ function App() {
     if (kind === 'table') {
       const definition = config.definition as { visibleColumns?: string[]; sortBy?: string; sortDirection?: 'asc' | 'desc' }
       const available = new Set(selected?.columns.map((column) => column.name))
+      const missing = (definition.visibleColumns ?? []).filter((column) => !available?.has(column))
+      if (missing.length) reportError(new Error(`Saved table view has missing columns: ${missing.join(', ')}`))
       setVisibleColumns((definition.visibleColumns ?? []).filter((column) => available.has(column)))
       setSortBy(definition.sortBy ?? '')
       setSortDirection(definition.sortDirection ?? 'asc')
@@ -294,6 +419,8 @@ function App() {
         fields?: string[]; labels?: Record<string, string>; section?: string; columns?: 1 | 2
       }
       const available = new Set(selected?.columns.map((column) => column.name))
+      const missing = (definition.fields ?? []).filter((field) => !available?.has(field))
+      if (missing.length) reportError(new Error(`Saved detail view has missing fields: ${missing.join(', ')}`))
       setDetailFields((definition.fields ?? []).filter((field) => available.has(field)))
       setDetailLabels(definition.labels ?? {})
       setDetailSection(definition.section ?? 'Record details')
@@ -308,7 +435,20 @@ function App() {
       if (kind === 'filter') setFilterConfigs((items) => items.filter((item) => item.id !== id))
       if (kind === 'table') setTableConfigs((items) => items.filter((item) => item.id !== id))
       if (kind === 'detail') setDetailConfigs((items) => items.filter((item) => item.id !== id))
-      if (activeConfig[kind] === id) setActiveConfig((current) => ({ ...current, [kind]: '' }))
+      if (activeConfig[kind] === id) {
+        setActiveConfig((current) => ({ ...current, [kind]: '' }))
+        if (selected) {
+          const key = `databnb:views:${selected.id}`
+          let active: Partial<Record<Configuration['kind'], string>> = {}
+          try {
+            active = JSON.parse(localStorage.getItem(key) ?? '{}')
+          } catch {
+            active = {}
+          }
+          delete active[kind]
+          localStorage.setItem(key, JSON.stringify(active))
+        }
+      }
     } catch (reason) {
       reportError(reason)
     }
@@ -319,6 +459,42 @@ function App() {
     setDraftRecord(Object.fromEntries(selected?.columns.map((column) => [column.name, row[column.name]]) ?? []))
     setEditing(false)
     setCreating(false)
+  }
+
+  const startCreateRecord = () => {
+    if (!selected) return
+    setRecord(null)
+    setDraftRecord(Object.fromEntries(selected.columns.map((column) => [column.name, null])))
+    setEditing(false)
+    setCreating(true)
+  }
+
+  const moveColumn = (columnName: string, distance: -1 | 1) => {
+    setVisibleColumns((items) => {
+      const index = items.indexOf(columnName)
+      const nextIndex = index + distance
+      if (index < 0 || nextIndex < 0 || nextIndex >= items.length) return items
+      const reordered = [...items]
+      ;[reordered[index], reordered[nextIndex]] = [reordered[nextIndex], reordered[index]]
+      return reordered
+    })
+  }
+
+  const moveDetailField = (fieldName: string, distance: -1 | 1) => {
+    setDetailFields((items) => {
+      const index = items.indexOf(fieldName)
+      const nextIndex = index + distance
+      if (index < 0 || nextIndex < 0 || nextIndex >= items.length) return items
+      const reordered = [...items]
+      ;[reordered[index], reordered[nextIndex]] = [reordered[nextIndex], reordered[index]]
+      return reordered
+    })
+  }
+
+  const navigateRecord = (distance: -1 | 1) => {
+    const index = result?.records.findIndex((item) => item._record_id === record?._record_id) ?? -1
+    const next = result?.records[index + distance]
+    if (next) openRecord(next)
   }
 
   const closeDetail = () => {
@@ -357,6 +533,25 @@ function App() {
       setMessage('Record deleted.')
       resetResult()
       await reloadDatasets(selected.id)
+    } catch (reason) {
+      reportError(reason)
+    }
+  }
+
+  const deleteDataset = async () => {
+    if (!selected || !window.confirm(`Delete “${selected.name}” and its saved views? This cannot be undone.`)) return
+    try {
+      const removedId = selected.id
+      await api.deleteDataset(removedId)
+      localStorage.removeItem(`databnb:views:${removedId}`)
+      setResult(null)
+      setRecord(null)
+      await reloadDatasets()
+      if (!datasets.some((item) => item.id !== removedId)) {
+        localStorage.removeItem('databnb:selected-dataset')
+      }
+      setMessage(`“${selected.name}” was deleted.`)
+      setError('')
     } catch (reason) {
       reportError(reason)
     }
@@ -448,7 +643,7 @@ function App() {
           <div className="content">
             <div className="page-heading">
               <div><p className="eyebrow">DATASET</p><h1>{selected.name}</h1><p className="dataset-description">{selected.description || `Imported from ${selected.source_filename}`}</p></div>
-              <button className="secondary" onClick={() => setShowImport(true)}>＋ Add dataset</button>
+              <div className="heading-actions"><button className="text-button danger" onClick={() => void deleteDataset()}>Delete dataset</button><button className="secondary" onClick={() => setShowImport(true)}>＋ Add dataset</button></div>
             </div>
             <div className="dataset-stats">
               <div><strong>{selected.row_count.toLocaleString()}</strong><span>records</span></div>
@@ -460,7 +655,7 @@ function App() {
             <section className="toolbar" aria-label="Table controls">
               <label className="searchbox"><span aria-hidden="true">⌕</span><input aria-label="Search all records" placeholder="Search all records…" value={search} onChange={(event) => { setLoading(true); setSearch(event.target.value); setPage(1) }} /><kbd>↵</kbd></label>
               <button className={`secondary ${activeConditions ? 'active-button' : ''}`} onClick={() => document.getElementById('filter-builder')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>☷ &nbsp;Filter{activeConditions ? ` · ${activeConditions}` : ''}</button>
-              <button className="secondary" onClick={() => setCreating(true)}>＋ Add record</button>
+              <button className="secondary" onClick={startCreateRecord}>＋ Add record</button>
               <details className="menu">
                 <summary className="secondary">Export &nbsp;⌄</summary>
                 <div className="menu-popover"><button onClick={() => void exportRecords('csv')}>Export matching records · CSV</button><button onClick={() => void exportRecords('xlsx')}>Export matching records · Excel</button></div>
@@ -486,12 +681,12 @@ function App() {
                 </div>
               })}
               <div className="filter-footer"><button className="text-button" onClick={addCondition}>＋ Add condition</button><div><button className="text-button" onClick={() => { setDraftConditions([]); setAppliedFilter(noFilters); setPage(1) }}>Clear</button><button className="primary small" onClick={applyFilters}>Apply filters</button></div></div>
-              {draftConditions.length > 0 && <div className="save-view-row"><input aria-label="Saved filter name" placeholder="Name this filter…" value={configurationName} onChange={(event) => setConfigurationName(event.target.value)} /><button className="secondary small" onClick={() => void saveConfiguration('filter', configurationName, { logic: filterLogic, conditions: draftConditions }, activeConfig.filter || undefined)}>Save filter</button><button className="text-button" onClick={() => void saveConfiguration('filter', configurationName, { logic: filterLogic, conditions: draftConditions })}>Save as new</button></div>}
+              {draftConditions.length > 0 && <div className="save-view-row"><input aria-label="Saved filter name" placeholder="Name this filter…" value={filterName} onChange={(event) => setFilterName(event.target.value)} /><button className="secondary small" disabled={!filterName.trim()} onClick={() => void saveConfiguration('filter', filterName, draftFilterDefinition, activeConfig.filter || undefined)}>{activeConfig.filter ? 'Update filter' : 'Save filter'}</button>{activeConfig.filter && <button className="text-button" disabled={!filterName.trim()} onClick={() => void saveConfiguration('filter', filterName, draftFilterDefinition)}>Save as new</button>}</div>}
               {result && <p className="match-count">{result.total.toLocaleString()} matching {result.total === 1 ? 'record' : 'records'}</p>}
             </section>
 
             <div className="table-settings">
-              <details className="column-menu"><summary className="text-button">Columns ({visibleColumns.length}/{selected.columns.length})</summary><div className="column-popover">{selected.columns.map((column) => <label key={column.name}><input type="checkbox" checked={visibleColumns.includes(column.name)} onChange={(event) => setVisibleColumns((items) => event.target.checked ? [...items, column.name] : items.filter((item) => item !== column.name))} />{column.name}</label>)}<button className="text-button" onClick={() => setVisibleColumns(selected.columns.map((column) => column.name))}>Restore defaults</button></div></details>
+              <details className="column-menu"><summary className="text-button">Columns ({visibleColumns.length}/{selected.columns.length})</summary><div className="column-popover">{selected.columns.map((column) => <div className="column-option" key={column.name}><label><input type="checkbox" checked={visibleColumns.includes(column.name)} onChange={(event) => setVisibleColumns((items) => event.target.checked ? [...items, column.name] : items.filter((item) => item !== column.name))} />{column.name}</label><span><button aria-label={`Move ${column.name} earlier`} disabled={!visibleColumns.includes(column.name) || visibleColumns.indexOf(column.name) === 0} onClick={() => moveColumn(column.name, -1)}>↑</button><button aria-label={`Move ${column.name} later`} disabled={!visibleColumns.includes(column.name) || visibleColumns.indexOf(column.name) === visibleColumns.length - 1} onClick={() => moveColumn(column.name, 1)}>↓</button></span></div>)}<button className="text-button" onClick={() => loadConfiguration('table', '')}>Restore defaults</button></div></details>
               <div className="saved-control inline"><label htmlFor="detail-layout">Record layout</label><select id="detail-layout" value={activeConfig.detail} onChange={(event) => loadConfiguration('detail', event.target.value)}><option value="">Default layout</option>{detailConfigs.map((config) => <option key={config.id} value={config.id}>{config.name}</option>)}</select></div>
               <span className="scope-note">Showing {result?.records.length ?? 0} of {result?.total ?? 0} matching records</span>
             </div>
@@ -511,18 +706,19 @@ function App() {
 
             <section className="view-editor">
               <div><strong>Save table view</strong><p>Keep your visible columns and sort order ready for next time.</p></div>
-              <input aria-label="Table view name" placeholder="Name this table view…" value={configurationName} onChange={(event) => setConfigurationName(event.target.value)} />
-              <button className="secondary small" onClick={() => void saveConfiguration('table', configurationName, { visibleColumns, sortBy, sortDirection }, activeConfig.table || undefined)}>Save table view</button>
-              <button className="text-button" onClick={() => void saveConfiguration('table', configurationName, { visibleColumns, sortBy, sortDirection })}>Save as new</button>
+              <input aria-label="Table view name" placeholder="Name this table view…" value={tableName} onChange={(event) => setTableName(event.target.value)} />
+              <button className="secondary small" disabled={!tableName.trim()} onClick={() => void saveConfiguration('table', tableName, { visibleColumns, sortBy, sortDirection }, activeConfig.table || undefined)}>{activeConfig.table ? 'Update view' : 'Save table view'}</button>
+              {activeConfig.table && <button className="text-button" disabled={!tableName.trim()} onClick={() => void saveConfiguration('table', tableName, { visibleColumns, sortBy, sortDirection })}>Save as new</button>}
             </section>
 
             <section className="view-editor detail-editor">
               <div><strong>Record detail layout</strong><p>Choose the fields and labels shown when you open a record.</p></div>
-              <input aria-label="Detail layout name" placeholder="Name this layout…" value={configurationName} onChange={(event) => setConfigurationName(event.target.value)} />
+              <input aria-label="Detail layout name" placeholder="Name this layout…" value={detailName} onChange={(event) => setDetailName(event.target.value)} />
               <input aria-label="Detail section name" placeholder="Section name" value={detailSection} onChange={(event) => setDetailSection(event.target.value)} />
               <select aria-label="Detail layout columns" value={detailColumns} onChange={(event) => setDetailColumns(Number(event.target.value) as 1 | 2)}><option value={1}>One column</option><option value={2}>Two columns</option></select>
-              <button className="secondary small" onClick={() => void saveConfiguration('detail', configurationName, { fields: detailFields, labels: detailLabels, section: detailSection, columns: detailColumns }, activeConfig.detail || undefined)}>Save layout</button>
-              <div className="detail-field-editor">{selected.columns.map((column) => <label key={column.name}><input type="checkbox" checked={detailFields.includes(column.name)} onChange={(event) => setDetailFields((items) => event.target.checked ? [...items, column.name] : items.filter((item) => item !== column.name))} /><span>{column.name}</span><input aria-label={`Display label for ${column.name}`} placeholder={column.name} value={detailLabels[column.name] ?? ''} onChange={(event) => setDetailLabels((labels) => ({ ...labels, [column.name]: event.target.value }))} /></label>)}</div>
+              <button className="secondary small" disabled={!detailName.trim()} onClick={() => void saveConfiguration('detail', detailName, { fields: detailFields, labels: detailLabels, section: detailSection, columns: detailColumns }, activeConfig.detail || undefined)}>{activeConfig.detail ? 'Update layout' : 'Save layout'}</button>
+              {activeConfig.detail && <button className="text-button" disabled={!detailName.trim()} onClick={() => void saveConfiguration('detail', detailName, { fields: detailFields, labels: detailLabels, section: detailSection, columns: detailColumns })}>Save as new</button>}
+              <div className="detail-field-editor">{selected.columns.map((column) => <div className="detail-field-option" key={column.name}><label><input type="checkbox" checked={detailFields.includes(column.name)} onChange={(event) => setDetailFields((items) => event.target.checked ? [...items, column.name] : items.filter((item) => item !== column.name))} /><span>{column.name}</span></label><span className="field-order"><button aria-label={`Move ${column.name} earlier`} disabled={!detailFields.includes(column.name) || detailFields.indexOf(column.name) === 0} onClick={() => moveDetailField(column.name, -1)}>↑</button><button aria-label={`Move ${column.name} later`} disabled={!detailFields.includes(column.name) || detailFields.indexOf(column.name) === detailFields.length - 1} onClick={() => moveDetailField(column.name, 1)}>↓</button></span><input aria-label={`Display label for ${column.name}`} placeholder={column.name} value={detailLabels[column.name] ?? ''} onChange={(event) => setDetailLabels((labels) => ({ ...labels, [column.name]: event.target.value }))} /></div>)}<button className="text-button" onClick={() => { setDetailFields(selected.columns.map((column) => column.name)); setDetailLabels({}); setDetailSection('Record details'); setDetailColumns(2); loadConfiguration('detail', '') }}>Restore defaults</button></div>
             </section>
           </div>
         )}
@@ -531,8 +727,8 @@ function App() {
       {(record || creating) && selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDetail() }}>
         <section className="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detail-title">
           <header><div><p className="eyebrow">{creating ? 'NEW RECORD' : 'RECORD DETAILS'}</p><h2 id="detail-title">{creating ? 'Add a record' : 'Record'}</h2></div><button className="icon-button" aria-label="Close details" onClick={closeDetail}>×</button></header>
-          {!creating && <div className="detail-section-heading"><strong>{detailSection}</strong><span>{detailColumns === 2 ? 'Two columns' : 'One column'}</span></div>}
-          <div className={`detail-fields columns-${detailColumns}`}>{selected.columns.filter((column) => creating || detailFields.includes(column.name)).map((column) => <label className="detail-field" key={column.name}><span>{detailLabels[column.name] || column.name}<small>{column.type.toLowerCase()}</small></span>{editing || creating ? renderEditor(column, draftRecord[column.name], (value) => setDraftRecord((current) => ({ ...current, [column.name]: value }))) : <output>{showValue(record?.[column.name])}</output>}</label>)}</div>
+          {!creating && <div className="detail-section-heading"><strong>{detailSection}</strong><span>{detailColumns === 2 ? 'Two columns' : 'One column'}</span><div className="record-navigation"><button className="text-button" onClick={() => navigateRecord(-1)} disabled={!result || result.records.findIndex((item) => item._record_id === record?._record_id) <= 0}>Previous</button><button className="text-button" onClick={() => navigateRecord(1)} disabled={!result || result.records.findIndex((item) => item._record_id === record?._record_id) >= result.records.length - 1}>Next</button></div></div>}
+          <div className={`detail-fields columns-${detailColumns}`}>{(creating ? selected.columns : detailFields.map((name) => selected.columns.find((column) => column.name === name)).filter((column): column is Column => column !== undefined)).map((column) => <label className="detail-field" key={column.name}><span>{detailLabels[column.name] || column.name}<small>{column.type.toLowerCase()}</small></span>{editing || creating ? renderEditor(column, draftRecord[column.name], (value) => setDraftRecord((current) => ({ ...current, [column.name]: value }))) : <output>{showValue(record?.[column.name])}</output>}</label>)}</div>
           <footer>
             {!creating && !editing && <button className="text-button danger" onClick={() => void deleteRecord()}>Delete record</button>}
             <span className="panel-spacer" />

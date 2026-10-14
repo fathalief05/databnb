@@ -17,7 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 100_000
@@ -46,6 +46,10 @@ def normalize_headers(headers: list[Any], width: int) -> list[str]:
         used.add(candidate.casefold())
         names.append(candidate)
     return names
+
+
+def upload_filename(filename: str) -> str:
+    return filename.replace("\\", "/").rsplit("/", 1)[-1] or "upload"
 
 
 def read_spreadsheet(
@@ -120,6 +124,10 @@ def infer_column_type(values: list[Any]) -> str:
     nonempty = [value for value in values if value is not None and str(value).strip() != ""]
     if not nonempty:
         return "VARCHAR"
+    if all(isinstance(value, datetime) for value in nonempty):
+        return "TIMESTAMP"
+    if all(isinstance(value, date) and not isinstance(value, datetime) for value in nonempty):
+        return "DATE"
     strings = [str(value).strip() for value in nonempty]
     if all(value.casefold() in {"true", "false"} for value in strings):
         return "BOOLEAN"
@@ -131,6 +139,16 @@ def infer_column_type(values: list[Any]) -> str:
             pass
     if all(_is_number(value) for value in strings):
         return "DOUBLE"
+    try:
+        if all(date.fromisoformat(value) for value in strings):
+            return "DATE"
+    except ValueError:
+        pass
+    try:
+        if all(datetime.fromisoformat(value.replace("Z", "+00:00")) for value in strings):
+            return "TIMESTAMP"
+    except ValueError:
+        pass
     return "VARCHAR"
 
 
@@ -156,6 +174,16 @@ def _coerce(value: Any, column_type: str) -> Any:
         return int(value)
     if column_type == "DOUBLE":
         return float(value)
+    if column_type == "DATE":
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return date.fromisoformat(str(value))
+    if column_type == "TIMESTAMP":
+        if isinstance(value, datetime):
+            return value
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return str(value)
 
 
@@ -210,8 +238,23 @@ def _compile_filter(
     if not isinstance(name, str):
         raise HTTPException(status_code=422, detail="A filter column is required")
     column = quote_identifier(_physical_column(dataset, name))
+    column_type = dataset["columns"][
+        next(index for index, item in enumerate(dataset["columns"]) if item["name"] == name)
+    ]["type"]
     operator = str(node.get("operator", "")).casefold()
     value = node.get("value")
+
+    def typed_filter_value(raw: Any) -> Any:
+        if raw is not None and not isinstance(raw, (str, int, float, bool)):
+            raise HTTPException(status_code=422, detail="Filter values must be simple values")
+        try:
+            return _coerce(raw, column_type)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid {column_type.lower()} filter value",
+            ) from exc
+
     if operator == "is_null":
         return f"{column} IS NULL", []
     if operator == "is_not_null":
@@ -222,26 +265,50 @@ def _compile_filter(
     if operator in {"true", "false"}:
         return f"{column} = ?", [operator == "true"]
     if operator in {"contains", "does_not_contain"}:
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise HTTPException(status_code=422, detail="Filter values must be simple values")
         expression = f"contains(lower(CAST({column} AS VARCHAR)), lower(?))"
-        return (f"NOT {expression}" if operator == "does_not_contain" else expression), [str(value or "")]
+        return (
+            f"NOT {expression}" if operator == "does_not_contain" else expression,
+            [str(value if value is not None else "")],
+        )
     if operator in {"starts_with", "ends_with"}:
         function = "starts_with" if operator == "starts_with" else "ends_with"
         return f"{function}(lower(CAST({column} AS VARCHAR)), lower(?))", [str(value or "")]
+    if operator in {"on", "before", "after"}:
+        column_type = dataset["columns"][
+            next(i for i, col in enumerate(dataset["columns"]) if col["name"] == name)
+        ]["type"]
+        if column_type not in {"DATE", "TIMESTAMP"}:
+            raise HTTPException(status_code=422, detail="Date comparisons require a date column")
+        comparison = {"on": "=", "before": "<", "after": ">"}[operator]
+        return f"{column} {comparison} ?", [typed_filter_value(value)]
     if operator in {"in", "not_in"}:
-        if not isinstance(value, list) or len(value) > 100:
+        if (
+            not isinstance(value, list)
+            or len(value) > 100
+            or any(not isinstance(item, (str, int, float, bool)) for item in value)
+        ):
             raise HTTPException(status_code=422, detail="Select up to 100 values")
         if not value:
             return ("FALSE" if operator == "in" else "TRUE"), []
         placeholders = ", ".join("?" for _ in value)
         keyword = "NOT IN" if operator == "not_in" else "IN"
-        return f"{column} {keyword} ({placeholders})", value
+        return f"{column} {keyword} ({placeholders})", [typed_filter_value(item) for item in value]
     if operator == "between":
-        if not isinstance(value, list) or len(value) != 2:
+        if (
+            not isinstance(value, list)
+            or len(value) != 2
+            or any(not isinstance(item, (str, int, float, bool)) for item in value)
+        ):
             raise HTTPException(status_code=422, detail="Between requires two values")
-        return f"{column} BETWEEN ? AND ?", value
+        return f"{column} BETWEEN ? AND ?", [typed_filter_value(item) for item in value]
     operators = {
         "equals": "=",
+        "on": "=",
         "not_equals": "<>",
+        "before": "<",
+        "after": ">",
         "greater_than": ">",
         "greater_than_or_equal": ">=",
         "less_than": "<",
@@ -251,12 +318,66 @@ def _compile_filter(
     if not sql_operator or isinstance(value, (dict, list)):
         raise HTTPException(status_code=422, detail="Unsupported filter operator or value")
     if operator in {"greater_than", "greater_than_or_equal", "less_than", "less_than_or_equal"}:
-        column_type = dataset["columns"][
-            next(i for i, col in enumerate(dataset["columns"]) if col["name"] == name)
-        ]["type"]
         if column_type not in {"BIGINT", "DOUBLE"}:
             raise HTTPException(status_code=422, detail="Numeric comparisons require a numeric column")
-    return f"{column} {sql_operator} ?", [value]
+    return f"{column} {sql_operator} ?", [typed_filter_value(value)]
+
+
+def _validate_configuration_definition(
+    dataset: dict[str, Any], kind: str, definition: dict[str, Any]
+) -> None:
+    columns = set(_column_names(dataset))
+    if kind == "filter":
+        _compile_filter(dataset, definition)
+        return
+    if kind == "table":
+        visible = definition.get("visibleColumns", [])
+        sort_by = definition.get("sortBy")
+        direction = definition.get("sortDirection", "asc")
+        if (
+            not isinstance(visible, list)
+            or any(not isinstance(name, str) or name not in columns for name in visible)
+            or len(visible) > len(columns)
+            or len(visible) != len(set(visible))
+        ):
+            raise HTTPException(status_code=422, detail="Table view contains invalid columns")
+        if sort_by is not None and (not isinstance(sort_by, str) or sort_by not in columns):
+            raise HTTPException(status_code=422, detail="Table view contains an invalid sort column")
+        if not isinstance(direction, str) or direction not in {"asc", "desc"}:
+            raise HTTPException(status_code=422, detail="Table view sort direction must be asc or desc")
+        return
+    if kind == "detail":
+        fields = definition.get("fields", [])
+        labels = definition.get("labels", {})
+        section = definition.get("section", "Record details")
+        column_count = definition.get("columns", 2)
+        if (
+            not isinstance(fields, list)
+            or any(not isinstance(name, str) or name not in columns for name in fields)
+            or len(fields) > len(columns)
+            or len(fields) != len(set(fields))
+        ):
+            raise HTTPException(status_code=422, detail="Detail view contains invalid fields")
+        if (
+            not isinstance(labels, dict)
+            or any(
+                not isinstance(name, str)
+                or name not in columns
+                or not isinstance(label, str)
+                or len(label) > 120
+                for name, label in labels.items()
+            )
+        ):
+            raise HTTPException(status_code=422, detail="Detail view contains invalid display labels")
+        if (
+            not isinstance(section, str)
+            or len(section) > 120
+            or type(column_count) is not int
+            or column_count not in {1, 2}
+        ):
+            raise HTTPException(status_code=422, detail="Detail view presentation is invalid")
+        return
+    raise HTTPException(status_code=422, detail="Unknown configuration type")
 
 
 class RecordInput(BaseModel):
@@ -268,6 +389,13 @@ class ConfigurationInput(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     definition: dict[str, Any]
     schema_version: int = Field(default=1, ge=1)
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Name cannot be blank")
+        return value.strip()
 
 
 class Database:
@@ -379,7 +507,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             for index, name in enumerate(headers)
         ]
         return {
-            "filename": file.filename,
+            "filename": upload_filename(file.filename or ""),
             "sheets": sheets,
             "columns": columns,
             "row_count": len(rows),
@@ -396,6 +524,8 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         content = await file.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="Files must be 25 MB or smaller")
+        if not name.strip():
+            raise HTTPException(status_code=422, detail="Dataset name cannot be blank")
         try:
             headers, rows, _ = read_spreadsheet(content, file.filename or "", sheet_name)
         except ValueError as exc:
@@ -434,7 +564,7 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
                         dataset_id,
                         name.strip(),
                         description.strip(),
-                        file.filename or "upload",
+                        upload_filename(file.filename or "upload"),
                         Path(file.filename or "").suffix.casefold().lstrip("."),
                         len(rows),
                         json.dumps(columns),
@@ -466,11 +596,11 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         parameters: list[Any] = []
         if search.strip() and dataset["columns"]:
             searchable = [
-                f"CAST({quote_identifier(f'c{index}')} AS VARCHAR) ILIKE ?"
+                f"contains(lower(CAST({quote_identifier(f'c{index}')} AS VARCHAR)), lower(?))"
                 for index in range(len(dataset["columns"]))
             ]
             where.append("(" + " OR ".join(searchable) + ")")
-            parameters.extend([f"%{search.strip()}%"] * len(searchable))
+            parameters.extend([search.strip()] * len(searchable))
         if filters:
             try:
                 filter_definition = json.loads(filters)
@@ -615,7 +745,8 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         kind: str = Query(pattern="^(filter|table|detail)$"),
         payload: ConfigurationInput = ...,
     ) -> dict[str, Any]:
-        database.dataset(dataset_id)
+        dataset = database.dataset(dataset_id)
+        _validate_configuration_definition(dataset, kind, payload.definition)
         configuration_id = str(uuid.uuid4())
         try:
             with database.lock:
@@ -676,7 +807,10 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     def update_configuration(
         dataset_id: str, configuration_id: str, payload: ConfigurationInput
     ) -> dict[str, Any]:
-        get_configuration(dataset_id, configuration_id)
+        existing = get_configuration(dataset_id, configuration_id)
+        _validate_configuration_definition(
+            database.dataset(dataset_id), existing["kind"], payload.definition
+        )
         try:
             with database.lock:
                 database.connection.execute(
@@ -719,12 +853,12 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         where_sql = f" WHERE {expression}" if expression else ""
         if payload.get("search"):
             searchable = [
-                f"CAST({quote_identifier(f'c{index}')} AS VARCHAR) ILIKE ?"
+                f"contains(lower(CAST({quote_identifier(f'c{index}')} AS VARCHAR)), lower(?))"
                 for index in range(len(dataset["columns"]))
             ]
             if searchable:
                 where_sql += (" AND " if where_sql else " WHERE ") + "(" + " OR ".join(searchable) + ")"
-                parameters.extend([f"%{str(payload['search']).strip()}%"] * len(searchable))
+                parameters.extend([str(payload["search"]).strip()] * len(searchable))
         column_indexes = {
             column["name"]: index for index, column in enumerate(dataset["columns"])
         }
@@ -745,7 +879,6 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             writer.writerows(rows if selected else [])
             content = text.getvalue().encode("utf-8-sig")
             media_type = "text/csv; charset=utf-8"
-            filename = f"{dataset['name']}.csv"
         else:
             workbook = Workbook(write_only=True)
             worksheet = workbook.create_sheet("Data")
@@ -756,11 +889,16 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             workbook.save(stream)
             content = stream.getvalue()
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            filename = f"{dataset['name']}.xlsx"
         return StreamingResponse(
             io.BytesIO(content),
             media_type=media_type,
-            headers={"Content-Disposition": f'attachment; filename="{Path(filename).name}"'},
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename=\""
+                    + (re.sub(r"[^A-Za-z0-9._-]+", "_", dataset["name"]).strip("._") or "dataset")
+                    + f".{output_format}\""
+                )
+            },
         )
 
     @app.delete("/api/datasets/{dataset_id}", status_code=204)

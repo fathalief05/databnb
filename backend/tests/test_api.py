@@ -5,7 +5,7 @@ from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from backend.app.main import create_app
 
@@ -111,6 +111,36 @@ def test_search_nested_filters_sort_and_pagination_use_full_dataset(tmp_path: Pa
     assert client.get(
         f"/api/datasets/{dataset['id']}/records", params={"search": "south"}
     ).json()["total"] == 1
+    invalid_value = client.get(
+        f"/api/datasets/{dataset['id']}/records",
+        params={"filters": json.dumps({"column": "amount", "operator": "greater_than", "value": "many"})},
+    )
+    assert invalid_value.status_code == 422
+    nulls = client.get(
+        f"/api/datasets/{dataset['id']}/records",
+        params={"filters": json.dumps({"column": "region", "operator": "is_null"})},
+    )
+    assert nulls.status_code == 200
+    assert nulls.json()["total"] == 1
+
+
+def test_date_columns_support_absolute_date_filters(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    imported = client.post(
+        "/api/datasets/import",
+        files={"file": ("dates.csv", b"day,created\n2025-01-05,2025-01-05T09:30:00\n2025-02-10,2025-02-10T14:00:00\n", "text/csv")},
+        data={"name": "Date sample"},
+    )
+    assert imported.status_code == 201, imported.text
+    dataset = imported.json()
+    assert [column["type"] for column in dataset["columns"]] == ["DATE", "TIMESTAMP"]
+
+    result = client.get(
+        f"/api/datasets/{dataset['id']}/records",
+        params={"filters": json.dumps({"column": "day", "operator": "after", "value": "2025-01-15"})},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["records"][0]["day"] == "2025-02-10"
 
 
 def test_filters_reject_unknown_columns_and_sql_injection(tmp_path: Path) -> None:
@@ -144,6 +174,15 @@ def test_record_crud_configurations_and_export_scope(tmp_path: Path) -> None:
     )
     assert update.status_code == 200
     assert update.json()["amount"] == 35
+    created = client.post(
+        f"/api/datasets/{dataset['id']}/records",
+        json={"values": {"region": "East", "amount": 50, "region (2)": "East"}},
+    )
+    assert created.status_code == 201, created.text
+    assert client.get(f"/api/datasets/{dataset['id']}/records").json()["total"] == 4
+    assert client.delete(
+        f"/api/datasets/{dataset['id']}/records/{created.json()['_record_id']}"
+    ).status_code == 204
 
     config = client.post(
         f"/api/datasets/{dataset['id']}/configurations?kind=filter",
@@ -169,6 +208,18 @@ def test_record_crud_configurations_and_export_scope(tmp_path: Path) -> None:
     )
     assert renamed.status_code == 200
     assert renamed.json()["name"] == "High value"
+    copied = client.post(
+        f"/api/datasets/{dataset['id']}/configurations?kind=filter",
+        json={
+            "name": "High value copy",
+            "definition": {"column": "amount", "operator": "greater_than", "value": 50},
+        },
+    )
+    assert copied.status_code == 201
+    restarted = make_client(tmp_path)
+    assert len(restarted.get(
+        f"/api/datasets/{dataset['id']}/configurations"
+    ).json()) == 2
 
     exported = client.post(
         f"/api/datasets/{dataset['id']}/export",
@@ -181,12 +232,82 @@ def test_record_crud_configurations_and_export_scope(tmp_path: Path) -> None:
     assert exported.status_code == 200
     rows = list(csv.reader(io.StringIO(exported.content.decode("utf-8-sig"))))
     assert rows == [["region", "amount"], ["South", "60"], ["", "90"]]
+    excel_export = client.post(
+        f"/api/datasets/{dataset['id']}/export",
+        json={"format": "xlsx", "columns": ["amount"]},
+    )
+    assert excel_export.status_code == 200
+    workbook = load_workbook(BytesIO(excel_export.content), read_only=True, data_only=True)
+    assert list(workbook.active.values)[0] == ("amount",)
+    workbook.close()
     assert client.delete(
         f"/api/datasets/{dataset['id']}/records/{record_id}"
     ).status_code == 204
     assert client.delete(
         f"/api/datasets/{dataset['id']}/configurations/{configuration_id}"
     ).status_code == 204
+    assert client.delete(
+        f"/api/datasets/{dataset['id']}/configurations/{copied.json()['id']}"
+    ).status_code == 204
+
+
+def test_dataset_deletion_removes_its_saved_configurations(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    dataset = import_csv(client)
+    saved = client.post(
+        f"/api/datasets/{dataset['id']}/configurations?kind=table",
+        json={"name": "Compact", "definition": {"visibleColumns": ["region"]}},
+    )
+    assert saved.status_code == 201
+    assert client.delete(f"/api/datasets/{dataset['id']}").status_code == 204
+    assert client.get(f"/api/datasets/{dataset['id']}").status_code == 404
+    assert client.get(f"/api/datasets/{dataset['id']}/configurations").status_code == 404
+
+
+def test_saved_configuration_definitions_are_validated(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    dataset = import_csv(client)
+    invalid_filter = client.post(
+        f"/api/datasets/{dataset['id']}/configurations?kind=filter",
+        json={
+            "name": "Unsafe",
+            "definition": {
+                "column": "amount; DROP TABLE datasets",
+                "operator": "equals",
+                "value": 1,
+            },
+        },
+    )
+    invalid_table = client.post(
+        f"/api/datasets/{dataset['id']}/configurations?kind=table",
+        json={"name": "Missing field", "definition": {"visibleColumns": ["missing"]}},
+    )
+    assert invalid_filter.status_code == 422
+    assert invalid_table.status_code == 422
+
+
+def test_csv_preview_falls_back_to_windows_1252(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    response = client.post(
+        "/api/import/preview",
+        files={"file": ("names.csv", b"name\nAndr\xe9\n", "text/csv")},
+    )
+    assert response.status_code == 200
+    assert response.json()["preview"] == [{"name": "André"}]
+
+
+def test_uploaded_column_names_are_quoted_as_display_labels(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    response = client.post(
+        "/api/datasets/import",
+        files={"file": ("quoted.csv", b'"column ""quoted""",value\nsafe,1\n', "text/csv")},
+        data={"name": "Quoted headers"},
+    )
+    assert response.status_code == 201, response.text
+    dataset = response.json()
+    record = client.get(f"/api/datasets/{dataset['id']}/records").json()["records"][0]
+    assert record['column "quoted"'] == "safe"
+    assert client.get("/api/datasets").status_code == 200
 
 
 def test_reject_oversized_and_malformed_files(tmp_path: Path) -> None:
