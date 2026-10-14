@@ -1,5 +1,4 @@
 import json
-import re
 from typing import Any
 from urllib.parse import quote
 
@@ -7,7 +6,9 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.connectors.spreadsheets import read_spreadsheet
+import re
+
+from app.connectors.spreadsheets import infer_schema, read_spreadsheet
 from app.core.database import DB_LOCK, connect
 from app.services.workspace import (
     delete_configuration,
@@ -64,7 +65,7 @@ async def preview_import(file: UploadFile = File(...), worksheet: str | None = F
     headers, rows, worksheets = read_spreadsheet(file.filename or "upload.csv", data, worksheet)
     return {
         "headers": headers,
-        "schema": __import__("app.connectors.spreadsheets", fromlist=["infer_schema"]).infer_schema(headers, rows),
+        "schema": infer_schema(headers, rows),
         "rows": rows[:25],
         "row_count": len(rows),
         "worksheets": worksheets,

@@ -218,3 +218,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# DataBNB local state and secrets
+.env
+.env.*
+!.env.example
+data/*
+!data/.gitkeep
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp
+uploads/
+
+# Frontend dependencies and build output
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*

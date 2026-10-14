@@ -1,5 +1,6 @@
 import csv
 import io
+import math
 import re
 from datetime import date, datetime
 from typing import Any
@@ -12,14 +13,18 @@ SUPPORTED_EXTENSIONS = {".csv", ".xlsx"}
 
 
 def _unique_headers(values: list[Any]) -> list[str]:
-    seen: dict[str, int] = {}
     headers = []
+    seen: set[str] = set()
     for index, value in enumerate(values):
         base = str(value).strip() if value is not None else ""
         base = re.sub(r"\s+", " ", base) or f"Column {index + 1}"
-        count = seen.get(base.casefold(), 0) + 1
-        seen[base.casefold()] = count
-        headers.append(base if count == 1 else f"{base}_{count}")
+        candidate = base
+        suffix = 2
+        while candidate.casefold() in seen:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        seen.add(candidate.casefold())
+        headers.append(candidate)
     return headers
 
 
@@ -38,7 +43,10 @@ def _parse_csv(data: bytes) -> tuple[list[str], list[list[Any]], list[str]]:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel
-    rows = list(csv.reader(io.StringIO(text, newline=""), dialect))
+    try:
+        rows = list(csv.reader(io.StringIO(text, newline=""), dialect, strict=True))
+    except csv.Error as error:
+        raise HTTPException(status_code=400, detail="This CSV file contains malformed rows.") from error
     if not rows:
         return [], [], []
     headers = _unique_headers(rows[0])
@@ -113,6 +121,11 @@ def _cell_type(value: Any) -> str:
         if normalized.casefold() in {"true", "false"}:
             return "boolean"
         try:
+            date.fromisoformat(normalized)
+            return "date"
+        except ValueError:
+            pass
+        try:
             int(normalized)
             return "integer"
         except ValueError:
@@ -125,11 +138,7 @@ def _cell_type(value: Any) -> str:
             datetime.fromisoformat(normalized.replace("Z", "+00:00"))
             return "datetime"
         except ValueError:
-            try:
-                date.fromisoformat(normalized)
-                return "date"
-            except ValueError:
-                return "text"
+            return "text"
     return "text"
 
 

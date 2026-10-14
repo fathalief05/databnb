@@ -1,7 +1,7 @@
 #root { min-height: 100vh; }
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 252px minmax(0, 1fr); }
 .sidebar { background: #fff; border-right: 1px solid var(--line); min-height: 100vh; padding: 23px 15px 18px; display: flex; flex-direction: column; }
-.brand { font: 800 23px/1 'Manrope', sans-serif; letter-spacing: -1.4px; text-decoration: none; display: flex; align-items: center; gap: 9px; padding: 0 10px; margin-bottom: 42px; }
+.brand { font: 800 23px/1 Inter, 'Segoe UI', sans-serif; letter-spacing: -1.4px; text-decoration: none; display: flex; align-items: center; gap: 9px; padding: 0 10px; margin-bottom: 42px; }
 .brand-mark { width: 29px; height: 29px; color: #fff; background: var(--green); border-radius: 9px 9px 9px 3px; display: grid; place-items: center; font-size: 21px; letter-spacing: -1px; }
 .brand-light { font-weight: 500; color: #7b8983; }
 .side-section-title { display: flex; justify-content: space-between; padding: 0 11px 24px; color: #9ba49f; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
@@ -34,7 +34,7 @@
 .eyebrow { color: #829188; font-size: 10px; font-weight: 700; letter-spacing: .11em; }
 .source-dot { display: inline-block; width: 7px; height: 7px; background: #71aa80; border-radius: 100%; margin-right: 5px; }
 h1,h2,p { margin-top: 0; }
-h1,h2 { font-family: 'Manrope','DM Sans', sans-serif; color: var(--ink); }
+h1,h2 { font-family: Inter, 'Segoe UI', sans-serif; color: var(--ink); }
 .workspace-heading h1 { font-size: 30px; margin: 10px 0 4px; letter-spacing: -.8px; }
 .workspace-heading p { font-size: 13px; color: #7e8983; margin: 0; }
 .dataset-stats { display: flex; align-items: center; gap: 12px; color: #86918b; font-size: 11px; margin-top: 16px; }
@@ -81,6 +81,11 @@ input[type=checkbox] { accent-color: var(--green); }
 .filter-controls { display: flex; gap: 7px; }
 .filter-controls select,.filter-controls input { height: 34px; min-width: 115px; border: 1px solid #e1e8e2; border-radius: 5px; background: white; padding: 0 9px; color: #526157; font-size: 11px; }
 .filter-controls input { flex: 1; }
+.filter-join { display: grid; place-items: center; min-width: 59px; color: #6c7b72; font-size: 10px; font-weight: 700; }
+.between-inputs { display: flex; align-items: center; gap: 5px; flex: 1; color: #94a097; font-size: 10px; }
+.between-inputs input { min-width: 70px; width: 40%; }
+.remove-condition { width: 30px; border: 0; background: transparent; color: #9b817d; font-size: 18px; cursor: pointer; }
+.filter-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
 .active-filter { display: flex; align-items: center; gap: 10px; padding-top: 11px; }
 .filter-chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #dce9df; border-radius: 5px; background: #eff7f1; color: #587263; padding: 5px 8px; font-size: 10px; }
 .filter-chip b { color: #3b654d; }

@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import math
 import uuid
 from datetime import date, datetime
 from typing import Any
@@ -114,12 +115,18 @@ def _coerce_cell(value: Any, data_type: str):
         return str(value)
     if data_type == "integer":
         return int(value)
-    if data_type == "number":
-        return float(value)
     if data_type == "boolean":
         if isinstance(value, bool):
             return value
-        return str(value).strip().casefold() == "true"
+        normalized = str(value).strip().casefold()
+        if normalized not in {"true", "false"}:
+            raise ValueError("expected true or false")
+        return normalized == "true"
+    if data_type == "number":
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("number must be finite")
+        return number
     if data_type == "date":
         if isinstance(value, datetime):
             return value.date()
@@ -143,6 +150,8 @@ def _column(dataset, name: str):
 def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0) -> str:
     if not definition:
         return "TRUE"
+    if not isinstance(definition, dict):
+        raise HTTPException(status_code=422, detail="Each filter must be a condition or group.")
     if depth > 5:
         raise HTTPException(status_code=422, detail="Filters may be nested no more than five levels.")
     node_type = definition.get("type", "group" if "conditions" in definition else "condition")
@@ -159,7 +168,7 @@ def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0) 
     column = _column(dataset, str(definition.get("column", "")))
     data_type = column["type"]
     operator = definition.get("operator")
-    if operator not in FILTER_OPERATORS[data_type]:
+    if not isinstance(operator, str) or operator not in FILTER_OPERATORS[data_type]:
         raise HTTPException(status_code=422, detail=f"{operator!s} is not supported for {data_type} columns.")
     field = quote_identifier(column["name"])
     if operator == "is_null":
@@ -167,7 +176,7 @@ def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0) 
     if operator == "is_not_null":
         return f"{field} IS NOT NULL"
     if operator == "is_empty":
-        return f"{field} = ''"
+        return f"({field} IS NULL OR {field} = '')"
     if operator == "is_not_empty":
         return f"{field} IS NOT NULL AND {field} <> ''"
     value = definition.get("value")
@@ -179,6 +188,8 @@ def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0) 
         if operator == "between":
             if not isinstance(value, list) or len(value) != 2:
                 raise ValueError("between filters require exactly two values")
+            if any(item is None or item == "" for item in value):
+                raise ValueError("between filters require two values")
             params.extend([_coerce_cell(value[0], data_type), _coerce_cell(value[1], data_type)])
             return f"{field} BETWEEN ? AND ?"
         if operator == "contains":
@@ -193,7 +204,7 @@ def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0) 
         if operator == "ends_with":
             params.append(str(value))
             return f"ends_with(CAST({field} AS VARCHAR), ?)"
-        params.append(_coerce_cell(value, data_type))
+        params.append("" if value == "" and data_type == "text" else _coerce_cell(value, data_type))
     except (ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail=f"Invalid value for {column['name']}: {error}") from error
     comparisons = {
@@ -342,9 +353,14 @@ def save_configuration(dataset_id: str, kind: str, name: str, description: str, 
             _dataset(connection, dataset_id)
             config_id = configuration_id or str(uuid.uuid4())
             if configuration_id:
-                exists = connection.execute("SELECT 1 FROM _configurations WHERE id = ?", [configuration_id]).fetchone()
-                if not exists:
+                existing = connection.execute(
+                    "SELECT kind FROM _configurations WHERE id = ? AND dataset_id = ?",
+                    [configuration_id, dataset_id],
+                ).fetchone()
+                if existing is None:
                     raise HTTPException(status_code=404, detail="Configuration not found.")
+                if existing[0] != kind:
+                    raise HTTPException(status_code=422, detail="A saved configuration cannot change its type.")
                 connection.execute(
                     "UPDATE _configurations SET name = ?, description = ?, config_json = ?, updated_at = current_timestamp "
                     "WHERE id = ? AND dataset_id = ? AND kind = ?",

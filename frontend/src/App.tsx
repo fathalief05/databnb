@@ -40,7 +40,7 @@ function App() {
   const [sortBy, setSortBy] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState('asc')
   const [activeFilter, setActiveFilter] = useState<FilterGroup | null>(null)
-  const [condition, setCondition] = useState<FilterCondition>({ type: 'condition', column: '', operator: 'contains', value: '' })
+  const [conditions, setConditions] = useState<FilterCondition[]>([{ type: 'condition', column: '', operator: 'contains', value: '' }])
   const [logic, setLogic] = useState<'and' | 'or'>('and')
   const [filterOpen, setFilterOpen] = useState(false)
   const [configurations, setConfigurations] = useState<SavedConfiguration[]>([])
@@ -52,7 +52,7 @@ function App() {
   const [columnOpen, setColumnOpen] = useState(false)
   const [layoutOpen, setLayoutOpen] = useState(false)
   const [layout, setLayout] = useState<Array<{ name: string; label: string; section: string; visible: boolean }>>([])
-  const [modal, setModal] = useState<'import' | 'save' | null>(null)
+  const [modal, setModal] = useState<'import' | 'save' | 'manage' | null>(null)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -63,11 +63,16 @@ function App() {
   const [worksheet, setWorksheet] = useState('')
   const [saveKind, setSaveKind] = useState<'filter' | 'table' | 'detail'>('filter')
   const [saveName, setSaveName] = useState('')
+  const [savePurpose, setSavePurpose] = useState<'create' | 'update' | 'rename' | 'duplicate'>('create')
+  const [configToUpdate, setConfigToUpdate] = useState<SavedConfiguration | null>(null)
 
   const dataset = datasets.find((item) => item.id === datasetId)
   const pageCount = Math.max(1, Math.ceil(total / 50))
   const visibleSchema = useMemo(
-    () => dataset?.schema.filter((column) => visibleColumns.includes(column.name)) ?? [],
+    () => visibleColumns.flatMap((name) => {
+      const column = dataset?.schema.find((item) => item.name === name)
+      return column ? [column] : []
+    }),
     [dataset, visibleColumns],
   )
 
@@ -75,27 +80,23 @@ function App() {
     const result = await api.datasets()
     setDatasets(result)
     const nextId = preferId && result.some((item) => item.id === preferId) ? preferId : datasetId && result.some((item) => item.id === datasetId) ? datasetId : result[0]?.id ?? ''
+    if (nextId !== datasetId) {
+      const selected = result.find((item) => item.id === nextId)
+      setPage(1)
+      setActiveFilter(null)
+      setSelectedRecord(null)
+      setVisibleColumns(selected?.schema.map((column) => column.name) ?? [])
+      setLayout(selected?.schema.map((column) => ({ name: column.name, label: column.name, section: 'Record', visible: true })) ?? [])
+    }
     setDatasetId(nextId)
   }, [datasetId])
 
   useEffect(() => {
     refreshDatasets().catch((cause) => setError(message(cause)))
-  }, [])
+  }, [refreshDatasets])
 
   useEffect(() => {
-    setPage(1)
-    setActiveFilter(null)
-    setSelectedRecord(null)
-    setVisibleColumns(dataset?.schema.map((column) => column.name) ?? [])
-    setLayout(dataset?.schema.map((column) => ({ name: column.name, label: column.name, section: 'Record', visible: true })) ?? [])
-  }, [datasetId])
-
-  useEffect(() => {
-    if (!datasetId) {
-      setRows([])
-      setTotal(0)
-      return
-    }
+    if (!datasetId) return
     let current = true
     const timer = window.setTimeout(() => {
       api.records(datasetId, page, search, sortBy, sortDir, activeFilter)
@@ -108,7 +109,7 @@ function App() {
   }, [datasetId, page, search, sortBy, sortDir, activeFilter])
 
   useEffect(() => {
-    if (!datasetId) { setConfigurations([]); return }
+    if (!datasetId) return
     api.configurations(datasetId).then(setConfigurations).catch((cause) => setError(message(cause)))
   }, [datasetId])
 
@@ -161,25 +162,28 @@ function App() {
   }
 
   function applyFilter() {
-    if (!condition.column) return
-    const nextCondition = { ...condition }
-    setActiveFilter({ type: 'group', logic, conditions: [nextCondition] })
+    const validConditions = conditions.filter((item) => item.column)
+    if (!validConditions.length) return
+    setActiveFilter({ type: 'group', logic, conditions: validConditions })
     setPage(1)
     setFilterOpen(false)
   }
 
   function saveConfig() {
     if (!datasetId || !saveName.trim()) return
-    const config =
+    const config = (savePurpose === 'rename' || savePurpose === 'duplicate') && configToUpdate ? configToUpdate.config :
       saveKind === 'filter' ? { filter: activeFilter } :
       saveKind === 'table' ? { visible_columns: visibleColumns, sort_by: sortBy, sort_dir: sortDir } :
       { fields: layout }
     setBusy(true)
-    api.saveConfiguration(datasetId, { kind: saveKind, name: saveName, config })
+    const id = savePurpose === 'update' || savePurpose === 'rename' ? configToUpdate?.id : undefined
+    api.saveConfiguration(datasetId, { kind: saveKind, name: saveName, config }, id)
       .then(async () => {
-        setNotice(`${saveKind === 'filter' ? 'Filter' : saveKind === 'table' ? 'Table view' : 'Detail layout'} saved.`)
+        setNotice(savePurpose === 'rename' ? 'Configuration renamed.' : savePurpose === 'update' ? 'Configuration updated.' : `${saveKind === 'filter' ? 'Filter' : saveKind === 'table' ? 'Table view' : 'Detail layout'} saved.`)
         setModal(null)
         setSaveName('')
+        setConfigToUpdate(null)
+        setSavePurpose('create')
         setConfigurations(await api.configurations(datasetId))
       })
       .catch((cause) => setError(message(cause)))
@@ -249,16 +253,42 @@ function App() {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
-  function setConditionColumn(name: string) {
+  function setConditionColumn(index: number, name: string) {
     const selected = dataset?.schema.find((column) => column.name === name)
     const options = operators[selected?.type ?? 'text'] ?? operators.text
-    setCondition({ type: 'condition', column: name, operator: options[0], value: '' })
+    setConditions((current) => current.map((item, row) => row === index
+      ? { type: 'condition', column: name, operator: options[0], value: '' }
+      : item))
+  }
+
+  function updateCondition(index: number, update: Partial<FilterCondition>) {
+    setConditions((current) => current.map((item, row) => row === index ? { ...item, ...update } : item))
   }
 
   function openSave(kind: 'filter' | 'table' | 'detail') {
     setSaveKind(kind)
     setSaveName('')
+    setConfigToUpdate(null)
+    setSavePurpose('create')
     setModal('save')
+  }
+
+  function editSavedConfiguration(configuration: SavedConfiguration, purpose: 'update' | 'rename' | 'duplicate') {
+    setConfigToUpdate(configuration)
+    setSaveKind(configuration.kind)
+    setSaveName(purpose === 'duplicate' ? `${configuration.name} copy` : configuration.name)
+    setSavePurpose(purpose)
+    setModal('save')
+  }
+
+  function selectDataset(id: string) {
+    const selected = datasets.find((item) => item.id === id)
+    setPage(1)
+    setActiveFilter(null)
+    setSelectedRecord(null)
+    setVisibleColumns(selected?.schema.map((column) => column.name) ?? [])
+    setLayout(selected?.schema.map((column) => ({ name: column.name, label: column.name, section: 'Record', visible: true })) ?? [])
+    setDatasetId(id)
   }
 
   function toggleColumn(name: string) {
@@ -276,9 +306,6 @@ function App() {
   const filterConfigurations = configurations.filter((item) => item.kind === 'filter')
   const tableConfigurations = configurations.filter((item) => item.kind === 'table')
   const detailConfigurations = configurations.filter((item) => item.kind === 'detail')
-  const activeCondition = activeFilter?.conditions[0] as FilterCondition | undefined
-  const inputType = condition.operator === 'between' ? 'number' : condition.operator === 'on' || condition.operator === 'before' || condition.operator === 'after' ? 'date' : 'text'
-
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -289,7 +316,7 @@ function App() {
         <div className="side-label">YOUR DATASETS <span>{datasets.length}</span></div>
         <nav className="dataset-nav" aria-label="Datasets">
           {datasets.map((item) => (
-            <button className={`dataset-link ${item.id === datasetId ? 'selected' : ''}`} key={item.id} onClick={() => setDatasetId(item.id)}>
+            <button className={`dataset-link ${item.id === datasetId ? 'selected' : ''}`} key={item.id} onClick={() => selectDataset(item.id)}>
               <span className="dataset-icon">▤</span><span className="dataset-name">{item.name}</span>
               <span className="dataset-count">{item.row_count.toLocaleString()}</span>
             </button>
@@ -324,7 +351,7 @@ function App() {
               <div className="heading-actions">
                 <button className="button secondary" onClick={() => exportData('csv')} title="Download all records or the filtered results as CSV">↓ Export CSV</button>
                 <button className="button secondary" onClick={() => exportData('xlsx')} title="Download all records or the filtered results as Excel">↓ Export Excel</button>
-                <button className="button primary" onClick={() => openRecord({}, true)}>＋ Add record</button>
+                <button className="button primary" onClick={() => openRecord({} as RecordRow, true)}>＋ Add record</button>
               </div>
             </section>
 
@@ -342,6 +369,7 @@ function App() {
                       <option value="">Table views</option>{tableConfigurations.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
                     </select>
                   </div>
+                  <button className="text-button manage-button" onClick={() => setModal('manage')}>Manage saved</button>
                   <button className={`icon-button ${filterOpen ? 'active' : ''}`} aria-label="Open filters" onClick={() => setFilterOpen(!filterOpen)}>☷ <span>Filter</span>{activeFilter && <i className="filter-dot" />}</button>
                   <div className="relative">
                     <button className={`icon-button ${columnOpen ? 'active' : ''}`} onClick={() => setColumnOpen(!columnOpen)}>▥ <span>Columns</span></button>
@@ -360,14 +388,35 @@ function App() {
 
               {filterOpen && <div className="filter-builder">
                 <div className="filter-builder-title"><div><strong>Filter records</strong><span>Filters run across all {dataset.row_count.toLocaleString()} records.</span></div><button className="close-button" onClick={() => setFilterOpen(false)}>×</button></div>
-                <div className="filter-controls">
-                  <select aria-label="Filter logic" value={logic} onChange={(event) => setLogic(event.target.value as 'and' | 'or')}><option value="and">Match all</option><option value="or">Match any</option></select>
-                  <select aria-label="Filter field" value={condition.column} onChange={(event) => setConditionColumn(event.target.value)}><option value="">Choose a field…</option>{dataset.schema.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select>
-                  <select aria-label="Filter operator" value={condition.operator} onChange={(event) => setCondition({ ...condition, operator: event.target.value })}>{(operators[dataset.schema.find((column) => column.name === condition.column)?.type ?? 'text'] ?? operators.text).map((operator) => <option value={operator} key={operator}>{labels[operator]}</option>)}</select>
-                  {!noValue.has(condition.operator) && <input aria-label="Filter value" type={inputType} value={Array.isArray(condition.value) ? condition.value.join(',') : String(condition.value ?? '')} placeholder={condition.operator === 'between' ? 'first, second' : 'Enter a value'} onChange={(event) => setCondition({ ...condition, value: condition.operator === 'between' ? event.target.value.split(',') : event.target.value })} />}
-                  <button className="button primary small" onClick={applyFilter} disabled={!condition.column}>Apply</button>
-                </div>
-                {activeCondition && <div className="active-filter"><span className="filter-chip"><b>{activeCondition.column}</b> {labels[activeCondition.operator]} {!noValue.has(activeCondition.operator) && <b>{Array.isArray(activeCondition.value) ? activeCondition.value.join(' – ') : String(activeCondition.value ?? '')}</b>}<button aria-label="Remove active filter" onClick={() => setActiveFilter(null)}>×</button></span><button className="text-button" onClick={() => setActiveFilter(null)}>Clear filter</button></div>}
+                {conditions.map((item, index) => {
+                  const columnType = dataset.schema.find((column) => column.name === item.column)?.type ?? 'text'
+                  const valueType = columnType === 'integer' || columnType === 'number' ? 'number' : columnType === 'date' || columnType === 'datetime' ? 'date' : 'text'
+                  return <div className="filter-controls" key={index}>
+                    {index === 0
+                      ? <select aria-label="Filter logic" value={logic} onChange={(event) => setLogic(event.target.value as 'and' | 'or')}><option value="and">Match all</option><option value="or">Match any</option></select>
+                      : <span className="filter-join">{logic.toUpperCase()}</span>}
+                    <select aria-label={`Filter field ${index + 1}`} value={item.column} onChange={(event) => setConditionColumn(index, event.target.value)}><option value="">Choose a field…</option>{dataset.schema.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select>
+                    <select aria-label={`Filter operator ${index + 1}`} value={item.operator} onChange={(event) => updateCondition(index, { operator: event.target.value, value: '' })}>{(operators[columnType] ?? operators.text).map((operator) => <option value={operator} key={operator}>{labels[operator]}</option>)}</select>
+                    {!noValue.has(item.operator) && (item.operator === 'between'
+                      ? <span className="between-inputs">
+                        <input aria-label={`Filter lower value ${index + 1}`} type={valueType} value={Array.isArray(item.value) ? String(item.value[0] ?? '') : ''} onChange={(event) => updateCondition(index, { value: [event.target.value, Array.isArray(item.value) ? item.value[1] ?? '' : ''] })} />
+                        <span>and</span>
+                        <input aria-label={`Filter upper value ${index + 1}`} type={valueType} value={Array.isArray(item.value) ? String(item.value[1] ?? '') : ''} onChange={(event) => updateCondition(index, { value: [Array.isArray(item.value) ? item.value[0] ?? '' : '', event.target.value] })} />
+                      </span>
+                      : columnType === 'boolean'
+                        ? <select aria-label={`Filter value ${index + 1}`} value={String(item.value ?? '')} onChange={(event) => updateCondition(index, { value: event.target.value })}><option value="">Choose…</option><option value="true">True</option><option value="false">False</option></select>
+                        : <input aria-label={`Filter value ${index + 1}`} type={valueType} value={String(item.value ?? '')} placeholder="Enter a value" onChange={(event) => updateCondition(index, { value: event.target.value })} />)}
+                    {conditions.length > 1 && <button className="remove-condition" aria-label="Remove condition" onClick={() => setConditions(conditions.filter((_, row) => row !== index))}>×</button>}
+                  </div>
+                })}
+                <div className="filter-actions"><button className="text-button" onClick={() => setConditions([...conditions, { type: 'condition', column: '', operator: 'contains', value: '' }])}>＋ Add condition</button><button className="button primary small" onClick={applyFilter} disabled={!conditions.some((item) => item.column)}>Apply filter</button></div>
+                {activeFilter && <div className="active-filter">{activeFilter.conditions.map((entry, index) => {
+                  const active = entry as FilterCondition
+                  return <span className="filter-chip" key={`${active.column}-${index}`}><b>{active.column}</b> {labels[active.operator]} {!noValue.has(active.operator) && <b>{Array.isArray(active.value) ? active.value.join(' – ') : String(active.value ?? '')}</b>}<button aria-label={`Remove ${active.column} filter`} onClick={() => {
+                    const remaining = activeFilter.conditions.filter((_, row) => row !== index)
+                    setActiveFilter(remaining.length ? { ...activeFilter, conditions: remaining } : null)
+                  }}>×</button></span>
+                })}<button className="text-button" onClick={() => setActiveFilter(null)}>Clear filter</button></div>}
                 <div className="filter-footer"><span>AND/OR logic is evaluated by the database against the full dataset.</span><button className="text-button" disabled={!activeFilter} onClick={() => openSave('filter')}>Save filter</button></div>
               </div>}
 
@@ -413,8 +462,8 @@ function App() {
         </aside>
       </div>}
 
-      {modal && <div className="modal-backdrop" onClick={() => !busy && setModal(null)}><section className="modal" onClick={(event) => event.stopPropagation()} aria-label={modal === 'import' ? 'Import data' : 'Save configuration'}>
-        <header><div><div className="eyebrow">{modal === 'import' ? 'ADD A DATA SOURCE' : 'SAVE FOR LATER'}</div><h2>{modal === 'import' ? 'Import a spreadsheet' : `Save ${saveKind === 'filter' ? 'filter' : saveKind === 'table' ? 'table view' : 'detail layout'}`}</h2></div><button className="close-button" onClick={() => setModal(null)}>×</button></header>
+      {modal && <div className="modal-backdrop" onClick={() => !busy && setModal(null)}><section className="modal" onClick={(event) => event.stopPropagation()} aria-label={modal === 'import' ? 'Import data' : modal === 'manage' ? 'Manage saved configurations' : 'Save configuration'}>
+        <header><div><div className="eyebrow">{modal === 'import' ? 'ADD A DATA SOURCE' : modal === 'manage' ? 'CONFIGURATIONS' : 'SAVE FOR LATER'}</div><h2>{modal === 'import' ? 'Import a spreadsheet' : modal === 'manage' ? 'Manage saved' : `${savePurpose === 'rename' ? 'Rename' : savePurpose === 'update' ? 'Update' : savePurpose === 'duplicate' ? 'Duplicate' : 'Save'} ${saveKind === 'filter' ? 'filter' : saveKind === 'table' ? 'table view' : 'detail layout'}`}</h2></div><button className="close-button" onClick={() => setModal(null)}>×</button></header>
         {modal === 'import' ? <div className="modal-content">
           <label className="field-label">Choose a CSV or Excel file
             <input type="file" accept=".csv,.xlsx" onChange={(event) => { const file = event.target.files?.[0]; if (file) handleFile(file) }} />
@@ -428,6 +477,16 @@ function App() {
             <div className="preview-scroll"><table><thead><tr>{preview.headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{preview.rows.slice(0, 5).map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{displayValue(value)}</td>)}</tr>)}</tbody></table></div>
           </>}
           <footer><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={!preview || !importName.trim() || busy} onClick={importDataset}>{busy ? 'Importing…' : 'Import dataset'}</button></footer>
+        </div> : modal === 'manage' ? <div className="modal-content">
+          {configurations.length === 0 ? <p className="save-explainer">No saved configurations for this dataset yet.</p> : configurations.map((configuration) => <div className="managed-config" key={configuration.id}>
+            <div><strong>{configuration.name}</strong><span>{configuration.kind === 'filter' ? 'Filter' : configuration.kind === 'table' ? 'Table view' : 'Detail layout'}</span></div>
+            <button className="text-button" onClick={() => { loadConfiguration(configuration); setModal(null) }}>Load</button>
+            <button className="text-button" onClick={() => { loadConfiguration(configuration); editSavedConfiguration(configuration, 'update') }}>Update</button>
+            <button className="text-button" onClick={() => editSavedConfiguration(configuration, 'rename')}>Rename</button>
+            <button className="text-button" onClick={() => editSavedConfiguration(configuration, 'duplicate')}>Duplicate</button>
+            <button className="text-button delete-config" onClick={() => deleteConfig(configuration)}>Delete</button>
+          </div>)}
+          <footer><button className="button secondary" onClick={() => setModal(null)}>Done</button></footer>
         </div> : <div className="modal-content">
           <label className="field-label">Name<input autoFocus maxLength={120} placeholder="e.g. High priority customers" value={saveName} onChange={(event) => setSaveName(event.target.value)} /></label>
           <p className="save-explainer">{saveKind === 'filter' ? 'This saves the current filter independently of your table layout.' : saveKind === 'table' ? 'This saves visible columns, order, and sorting for this dataset.' : 'This saves visible fields, labels, sections, and order.'}</p>
