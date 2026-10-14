@@ -140,6 +140,7 @@ tbody tr:hover { background: #f8fbf8; }
 .record-fields small { display: block; color: #a0aaa3; font-size: 9px; margin-top: 3px; }
 .record-fields input { min-width: 0; padding: 7px 8px; border: 1px solid #e4e9e4; border-radius: 4px; color: #38463d; font-size: 11px; }
 .record-value p { margin: 0; color: #35443b; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.detail-section h3 { margin: 15px 0 0; padding: 8px 0 5px; border-bottom: 1px solid #edf0ed; color: #65756b; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .drawer-footer { padding-top: 14px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
 .layout-editor { border-top: 1px solid var(--line); padding: 13px 0; }
 .layout-row { grid-template-columns: 1fr 100px auto; display: grid; }
@@ -160,6 +161,14 @@ tbody tr:hover { background: #f8fbf8; }
 .preview-scroll th { top: 0; }
 .preview-scroll td,.preview-scroll th { font-size: 10px; height: 30px; padding: 0 9px; }
 .modal-content footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 5px; }
+.modal-error { margin: 12px 0 0; }
+.managed-config { display: grid; grid-template-columns: minmax(90px,1fr) repeat(5,auto); align-items: center; gap: 7px; padding: 9px 0; border-bottom: 1px solid #edf0ed; }
+.managed-config > div { min-width: 0; }
+.managed-config strong,.managed-config span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.managed-config strong { font-size: 11px; color: #4b5a50; }
+.managed-config span { color: #919b95; font-size: 9px; margin-top: 2px; }
+.managed-config .text-button { font-size: 10px; }
+.managed-config .delete-config { color: #a45e53; }
 .save-explainer { color: #829087; font-size: 11px; line-height: 1.6; padding: 5px 0 12px; }
 
 @media (max-width: 1060px) {

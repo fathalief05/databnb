@@ -82,6 +82,8 @@ function App() {
     const nextId = preferId && result.some((item) => item.id === preferId) ? preferId : datasetId && result.some((item) => item.id === datasetId) ? datasetId : result[0]?.id ?? ''
     if (nextId !== datasetId) {
       const selected = result.find((item) => item.id === nextId)
+      setRows([])
+      setTotal(0)
       setPage(1)
       setActiveFilter(null)
       setSelectedRecord(null)
@@ -92,8 +94,17 @@ function App() {
   }, [datasetId])
 
   useEffect(() => {
-    refreshDatasets().catch((cause) => setError(message(cause)))
-  }, [refreshDatasets])
+    let current = true
+    api.datasets().then((result) => {
+      if (!current) return
+      const initial = result[0]
+      setDatasets(result)
+      setDatasetId(initial?.id ?? '')
+      setVisibleColumns(initial?.schema.map((column) => column.name) ?? [])
+      setLayout(initial?.schema.map((column) => ({ name: column.name, label: column.name, section: 'Record', visible: true })) ?? [])
+    }).catch((cause) => { if (current) setError(message(cause)) })
+    return () => { current = false }
+  }, [])
 
   useEffect(() => {
     if (!datasetId) return
@@ -192,7 +203,12 @@ function App() {
 
   function loadConfiguration(configuration: SavedConfiguration) {
     if (configuration.kind === 'filter') {
-      setActiveFilter((configuration.config.filter as FilterGroup | null) ?? null)
+      const filter = (configuration.config.filter as FilterGroup | null) ?? null
+      setActiveFilter(filter)
+      if (filter) {
+        setLogic(filter.logic)
+        setConditions(filter.conditions.map((condition) => condition as FilterCondition))
+      }
       setPage(1)
     } else if (configuration.kind === 'table') {
       const names = configuration.config.visible_columns as string[]
@@ -283,6 +299,8 @@ function App() {
 
   function selectDataset(id: string) {
     const selected = datasets.find((item) => item.id === id)
+    setRows([])
+    setTotal(0)
     setPage(1)
     setActiveFilter(null)
     setSelectedRecord(null)
@@ -336,7 +354,7 @@ function App() {
           <div className="topbar-right"><span className="local-badge"><i /> Local only</span><button className="avatar" title="Local workspace">F</button></div>
         </header>
 
-        {error && <div className="notice error-notice" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
+        {error && !modal && <div className="notice error-notice" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
         {notice && <div className="notice success-notice" role="status">{notice}<button onClick={() => setNotice('')}>×</button></div>}
 
         {dataset ? (
@@ -456,7 +474,7 @@ function App() {
           <header><div><div className="eyebrow">RECORD DETAILS</div><h2>{recordIsNew ? 'New record' : `Record ${(page - 1) * 50 + rows.findIndex((item) => item._record_id === selectedRecord._record_id) + 1}`}</h2></div><button className="close-button" aria-label="Close details" onClick={() => { if (editing && !window.confirm('Discard unsaved changes?')) return; setSelectedRecord(null); setEditing(false) }}>×</button></header>
           <div className="drawer-toolbar">{!editing && <><button className="button secondary" onClick={() => { setEditing(true); setRecordIsNew(false) }}>✎ Edit record</button><button className="button danger" onClick={removeSelectedRecord}>Delete</button></>}<select aria-label="Load detail layout" defaultValue="" onChange={(event) => { const config = detailConfigurations.find((item) => item.id === event.target.value); if (config) loadConfiguration(config); event.target.value = '' }}><option value="">Detail layout</option>{detailConfigurations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>
           {editing ? <div className="record-fields">{dataset?.schema.map((column) => <label key={column.name}><span>{column.name}<small>{column.type}</small></span><input value={recordValues[column.name] ?? ''} onChange={(event) => setRecordValues({ ...recordValues, [column.name]: event.target.value })} /></label>)}</div> :
-            <div className="record-fields">{layout.filter((field) => field.visible && selectedRecord[field.name] !== undefined).map((field) => <div className="record-value" key={field.name}><span>{field.label || field.name}<small>{field.section}</small></span><p>{displayValue(selectedRecord[field.name])}</p></div>)}</div>}
+            <div className="record-fields">{Array.from(new Set(layout.filter((field) => field.visible && selectedRecord[field.name] !== undefined).map((field) => field.section || 'Record'))).map((section) => <section className="detail-section" key={section}><h3>{section}</h3>{layout.filter((field) => field.visible && selectedRecord[field.name] !== undefined && (field.section || 'Record') === section).map((field) => <div className="record-value" key={field.name}><span>{field.label || field.name}</span><p>{displayValue(selectedRecord[field.name])}</p></div>)}</section>)}</div>}
           {layoutOpen && <div className="layout-editor"><div className="popover-heading">Customize record layout</div>{layout.map((field, index) => <div className="layout-row" key={field.name}><label><input type="checkbox" checked={field.visible} onChange={(event) => setLayout(layout.map((item) => item.name === field.name ? { ...item, visible: event.target.checked } : item))} /><input aria-label={`Label for ${field.name}`} value={field.label} onChange={(event) => setLayout(layout.map((item) => item.name === field.name ? { ...item, label: event.target.value } : item))} /></label><input aria-label={`Section for ${field.name}`} value={field.section} onChange={(event) => setLayout(layout.map((item) => item.name === field.name ? { ...item, section: event.target.value } : item))} placeholder="Section" /><span><button aria-label="Move field up" disabled={index === 0} onClick={() => { const next = [...layout]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; setLayout(next) }}>↑</button><button aria-label="Move field down" disabled={index === layout.length - 1} onClick={() => { const next = [...layout]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; setLayout(next) }}>↓</button></span></div>)}<button className="button secondary full" onClick={() => openSave('detail')}>Save detail layout</button></div>}
           <div className="drawer-footer">{editing ? <><button className="button secondary" onClick={() => { setEditing(false); if (recordIsNew) setSelectedRecord(null) }}>Cancel</button><button className="button primary" onClick={saveRecord}>Save record</button></> : <button className="text-button" onClick={() => setLayoutOpen(!layoutOpen)}>{layoutOpen ? 'Close layout editor' : 'Customize layout'}</button>}</div>
         </aside>
@@ -464,6 +482,7 @@ function App() {
 
       {modal && <div className="modal-backdrop" onClick={() => !busy && setModal(null)}><section className="modal" onClick={(event) => event.stopPropagation()} aria-label={modal === 'import' ? 'Import data' : modal === 'manage' ? 'Manage saved configurations' : 'Save configuration'}>
         <header><div><div className="eyebrow">{modal === 'import' ? 'ADD A DATA SOURCE' : modal === 'manage' ? 'CONFIGURATIONS' : 'SAVE FOR LATER'}</div><h2>{modal === 'import' ? 'Import a spreadsheet' : modal === 'manage' ? 'Manage saved' : `${savePurpose === 'rename' ? 'Rename' : savePurpose === 'update' ? 'Update' : savePurpose === 'duplicate' ? 'Duplicate' : 'Save'} ${saveKind === 'filter' ? 'filter' : saveKind === 'table' ? 'table view' : 'detail layout'}`}</h2></div><button className="close-button" onClick={() => setModal(null)}>×</button></header>
+        {error && <div className="notice error-notice modal-error" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
         {modal === 'import' ? <div className="modal-content">
           <label className="field-label">Choose a CSV or Excel file
             <input type="file" accept=".csv,.xlsx" onChange={(event) => { const file = event.target.files?.[0]; if (file) handleFile(file) }} />
@@ -490,7 +509,7 @@ function App() {
         </div> : <div className="modal-content">
           <label className="field-label">Name<input autoFocus maxLength={120} placeholder="e.g. High priority customers" value={saveName} onChange={(event) => setSaveName(event.target.value)} /></label>
           <p className="save-explainer">{saveKind === 'filter' ? 'This saves the current filter independently of your table layout.' : saveKind === 'table' ? 'This saves visible columns, order, and sorting for this dataset.' : 'This saves visible fields, labels, sections, and order.'}</p>
-          <footer><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={!saveName.trim() || busy} onClick={saveConfig}>Save configuration</button></footer>
+          <footer><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={!saveName.trim() || busy} onClick={saveConfig}>{savePurpose === 'rename' ? 'Rename configuration' : savePurpose === 'update' ? 'Update configuration' : savePurpose === 'duplicate' ? 'Create duplicate' : 'Save configuration'}</button></footer>
         </div>}
       </section></div>}
     </div>

@@ -147,9 +147,13 @@ def _column(dataset, name: str):
     raise HTTPException(status_code=422, detail="A requested column is not part of this dataset.")
 
 
-def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0) -> str:
+def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0, budget: dict | None = None) -> str:
     if not definition:
         return "TRUE"
+    budget = budget if budget is not None else {"remaining": 200}
+    budget["remaining"] -= 1
+    if budget["remaining"] < 0:
+        raise HTTPException(status_code=422, detail="Filters may contain no more than 200 conditions.")
     if not isinstance(definition, dict):
         raise HTTPException(status_code=422, detail="Each filter must be a condition or group.")
     if depth > 5:
@@ -162,9 +166,11 @@ def _filter_sql(dataset, definition: dict | None, params: list, depth: int = 0) 
         children = definition.get("conditions", [])
         if not isinstance(children, list) or len(children) > 100:
             raise HTTPException(status_code=422, detail="A filter group must contain at most 100 conditions.")
-        compiled = [_filter_sql(dataset, child, params, depth + 1) for child in children]
+        compiled = [_filter_sql(dataset, child, params, depth + 1, budget) for child in children]
         compiled = [child for child in compiled if child != "TRUE"]
         return "(" + (" AND " if logic == "and" else " OR ").join(compiled) + ")" if compiled else "TRUE"
+    if node_type != "condition":
+        raise HTTPException(status_code=422, detail="Filter node types must be condition or group.")
     column = _column(dataset, str(definition.get("column", "")))
     data_type = column["type"]
     operator = definition.get("operator")

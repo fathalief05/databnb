@@ -72,6 +72,7 @@ Check frontend lint and build:
 
 ```powershell
 npm --prefix frontend run lint
+npm --prefix frontend test
 npm --prefix frontend run build
 ```
 

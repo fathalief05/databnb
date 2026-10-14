@@ -54,7 +54,7 @@ describe('DataBNB workspace', () => {
     await user.click(within(details).getByRole('button', { name: 'Save record' }))
 
     await waitFor(() => expect(api.saveRecord).toHaveBeenCalledWith('dataset-1', { Name: 'Aster', Amount: '240' }, 'row-1'))
-    expect(await within(details).findByText('Record saved.')).toBeInTheDocument()
+    expect(await screen.findByRole('status')).toHaveTextContent('Record saved.')
   })
 
   it('builds a database-backed filter and submits it with the record query', async () => {
@@ -86,5 +86,27 @@ describe('DataBNB workspace', () => {
         ],
       },
     ))
+  })
+
+  it('previews and imports a spreadsheet before adding it to the workspace', async () => {
+    const user = userEvent.setup()
+    const imported = { ...sampleDataset, id: 'dataset-2', name: 'People', source_filename: 'people.csv', row_count: 1 }
+    vi.mocked(api.datasets).mockResolvedValueOnce([sampleDataset]).mockResolvedValueOnce([sampleDataset, imported])
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ headers: ['Name'], schema: [{ name: 'Name', type: 'text' }], rows: [['Ada']], row_count: 1, worksheets: [] }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => imported }))
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Customers' })
+    await user.click(screen.getByRole('button', { name: /import data/i }))
+    const file = new File(['Name\nAda'], 'people.csv', { type: 'text/csv' })
+    await user.upload(screen.getByLabelText(/choose a csv or excel file/i), file)
+    expect(await screen.findByText('1 records · 1 fields')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Import dataset' }))
+
+    expect(await screen.findByText('1 records imported.')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'People' })).toBeInTheDocument()
   })
 })

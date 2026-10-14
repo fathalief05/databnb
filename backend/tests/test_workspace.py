@@ -1,6 +1,7 @@
 import csv
 import io
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
@@ -104,10 +105,14 @@ def test_record_crud_saved_configurations_and_exports(client):
         f"/api/datasets/{dataset_id}/configurations/{config_id}",
         json={"kind": "filter", "name": "Renamed", "config": {"filter": None}},
     ).json()["name"] == "Renamed"
-    assert client.post(
+    table_config = client.post(
         f"/api/datasets/{dataset_id}/configurations",
         json={"kind": "table", "name": "Invalid type change", "config": {}},
-    ).status_code == 200
+    ).json()
+    assert client.put(
+        f"/api/datasets/{dataset_id}/configurations/{table_config['id']}",
+        json={"kind": "filter", "name": "Changed kind", "config": {}},
+    ).status_code == 422
     assert client.delete(f"/api/datasets/{dataset_id}/configurations/{config_id}").json() == {"deleted": True}
 
     filters = __import__("json").dumps({

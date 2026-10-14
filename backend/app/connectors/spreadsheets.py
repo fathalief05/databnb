@@ -53,6 +53,8 @@ def _parse_csv(data: bytes) -> tuple[list[str], list[list[Any]], list[str]]:
     width = len(headers)
     normalized = []
     for row in rows[1:]:
+        if len(row) > width and any(value != "" for value in row[width:]):
+            raise HTTPException(status_code=400, detail="A CSV row contains more cells than the header.")
         values = (row + [None] * width)[:width]
         normalized.append([value if value != "" else None for value in values])
     return headers, normalized, []
@@ -77,6 +79,8 @@ def _parse_xlsx(data: bytes, worksheet: str | None) -> tuple[list[str], list[lis
         width = len(headers)
         rows = []
         for row in values[1:]:
+            if len(row) > width and any(cell is not None and cell != "" for cell in row[width:]):
+                raise HTTPException(status_code=400, detail="A worksheet row contains values beyond the header.")
             cells = list(row[:width]) + [None] * max(0, width - len(row))
             rows.append([cell if cell != "" else None for cell in cells])
         return headers, rows, sheet_names
