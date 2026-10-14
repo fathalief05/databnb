@@ -1,756 +1,529 @@
-import { useEffect, useMemo, useState } from 'react'
-import { api, type Column, type Configuration, type Condition, type Dataset, type FilterGroup, type PageResult, type Preview, type RecordRow } from './api'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { api } from './services/api'
+import type { Column, Dataset, FilterCondition, FilterGroup, RecordRow, SavedConfiguration } from './types'
 import './App.css'
 
-const PAGE_SIZE = 50
-const noFilters: FilterGroup = { logic: 'and', conditions: [] }
+const operators: Record<string, string[]> = {
+  text: ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'ends_with', 'is_empty', 'is_not_empty', 'is_null', 'is_not_null'],
+  integer: ['equals', 'not_equals', 'greater_than', 'greater_or_equal', 'less_than', 'less_or_equal', 'between', 'is_null', 'is_not_null'],
+  number: ['equals', 'not_equals', 'greater_than', 'greater_or_equal', 'less_than', 'less_or_equal', 'between', 'is_null', 'is_not_null'],
+  date: ['on', 'before', 'after', 'between', 'is_null', 'is_not_null'],
+  datetime: ['on', 'before', 'after', 'between', 'is_null', 'is_not_null'],
+  boolean: ['equals', 'is_null', 'is_not_null'],
+}
+const noValue = new Set(['is_empty', 'is_not_empty', 'is_null', 'is_not_null'])
+const labels: Record<string, string> = {
+  equals: 'is', not_equals: 'is not', contains: 'contains', not_contains: 'does not contain',
+  starts_with: 'starts with', ends_with: 'ends with', is_empty: 'is empty', is_not_empty: 'is not empty',
+  greater_than: 'greater than', greater_or_equal: 'at least', less_than: 'less than',
+  less_or_equal: 'at most', between: 'is between', on: 'is on', before: 'is before', after: 'is after',
+  is_null: 'is missing', is_not_null: 'is not missing',
+}
 
-function showValue(value: unknown) {
+function message(error: unknown) {
+  return error instanceof Error ? error.message : 'Something went wrong. Please try again.'
+}
+
+function displayValue(value: unknown) {
   if (value === null || value === undefined || value === '') return '—'
-  if (typeof value === 'boolean') return value ? 'True' : 'False'
+  if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
-}
-
-function filterOperators(column?: Column) {
-  const general = [['is_null', 'Is null'], ['is_not_null', 'Is not null']]
-  if (column?.type === 'BOOLEAN') return [['true', 'Is true'], ['false', 'Is false'], ...general]
-  if (column?.type === 'DATE' || column?.type === 'TIMESTAMP') {
-    return [['on', 'On'], ['before', 'Before'], ['after', 'After'], ['between', 'Between'], ...general]
-  }
-  if (column?.type === 'BIGINT' || column?.type === 'DOUBLE') {
-    return [
-      ['equals', 'Equals'], ['not_equals', 'Does not equal'],
-      ['greater_than', 'Greater than'], ['greater_than_or_equal', 'At least'],
-      ['less_than', 'Less than'], ['less_than_or_equal', 'At most'],
-      ['between', 'Between'], ...general,
-    ]
-  }
-  return [
-    ['equals', 'Equals'], ['not_equals', 'Does not equal'],
-    ['contains', 'Contains'], ['does_not_contain', 'Does not contain'],
-    ['starts_with', 'Starts with'], ['ends_with', 'Ends with'],
-    ['is_empty', 'Is empty'], ['is_not_empty', 'Is not empty'], ...general,
-  ]
-}
-
-function filterColumns(node: Condition | FilterGroup): string[] {
-  if ('conditions' in node) return node.conditions.flatMap((condition) => filterColumns(condition))
-  return [node.column]
 }
 
 function App() {
   const [datasets, setDatasets] = useState<Dataset[]>([])
-  const [selectedId, setSelectedId] = useState('')
-  const [result, setResult] = useState<PageResult | null>(null)
+  const [datasetId, setDatasetId] = useState('')
+  const [rows, setRows] = useState<RecordRow[]>([])
+  const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
-  const [sortBy, setSortBy] = useState('')
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
-  const [appliedFilter, setAppliedFilter] = useState<FilterGroup>(noFilters)
-  const [draftConditions, setDraftConditions] = useState<Condition[]>([])
-  const [filterLogic, setFilterLogic] = useState<'and' | 'or'>('and')
-  const [visibleColumns, setVisibleColumns] = useState<string[]>([])
-  const [detailFields, setDetailFields] = useState<string[]>([])
-  const [detailLabels, setDetailLabels] = useState<Record<string, string>>({})
-  const [detailSection, setDetailSection] = useState('Record details')
-  const [detailColumns, setDetailColumns] = useState<1 | 2>(2)
-  const [filterConfigs, setFilterConfigs] = useState<Configuration[]>([])
-  const [tableConfigs, setTableConfigs] = useState<Configuration[]>([])
-  const [detailConfigs, setDetailConfigs] = useState<Configuration[]>([])
-  const [activeConfig, setActiveConfig] = useState<Record<Configuration['kind'], string>>({
-    filter: '', table: '', detail: '',
-  })
-  const [record, setRecord] = useState<RecordRow | null>(null)
-  const [draftRecord, setDraftRecord] = useState<Record<string, unknown>>({})
+  const [sortBy, setSortBy] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState('asc')
+  const [activeFilter, setActiveFilter] = useState<FilterGroup | null>(null)
+  const [conditions, setConditions] = useState<FilterCondition[]>([{ type: 'condition', column: '', operator: 'contains', value: '' }])
+  const [logic, setLogic] = useState<'and' | 'or'>('and')
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [configurations, setConfigurations] = useState<SavedConfiguration[]>([])
+  const [selectedRecord, setSelectedRecord] = useState<RecordRow | null>(null)
   const [editing, setEditing] = useState(false)
-  const [creating, setCreating] = useState(false)
-  const [showImport, setShowImport] = useState(false)
-  const [file, setFile] = useState<File | null>(null)
-  const [preview, setPreview] = useState<Preview | null>(null)
-  const [sheet, setSheet] = useState('')
-  const [importName, setImportName] = useState('')
-  const [description, setDescription] = useState('')
-  const [filterName, setFilterName] = useState('')
-  const [tableName, setTableName] = useState('')
-  const [detailName, setDetailName] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [refresh, setRefresh] = useState(0)
-  const [message, setMessage] = useState('')
+  const [recordValues, setRecordValues] = useState<Record<string, string>>({})
+  const [recordIsNew, setRecordIsNew] = useState(false)
+  const [visibleColumns, setVisibleColumns] = useState<string[]>([])
+  const [columnOpen, setColumnOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportScope, setExportScope] = useState<'all' | 'filtered'>('all')
+  const [exportVisibleOnly, setExportVisibleOnly] = useState(false)
+  const [layoutOpen, setLayoutOpen] = useState(false)
+  const [layout, setLayout] = useState<Array<{ name: string; label: string; section: string; visible: boolean }>>([])
+  const [modal, setModal] = useState<'import' | 'save' | 'manage' | null>(null)
+  const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const [importName, setImportName] = useState('')
+  const [importDescription, setImportDescription] = useState('')
+  const [preview, setPreview] = useState<{ headers: string[]; schema: Column[]; rows: unknown[][]; row_count: number; worksheets: string[] } | null>(null)
+  const [worksheet, setWorksheet] = useState('')
+  const [saveKind, setSaveKind] = useState<'filter' | 'table' | 'detail'>('filter')
+  const [saveName, setSaveName] = useState('')
+  const [savePurpose, setSavePurpose] = useState<'create' | 'update' | 'rename' | 'duplicate'>('create')
+  const [configToUpdate, setConfigToUpdate] = useState<SavedConfiguration | null>(null)
 
-  const selected = datasets.find((dataset) => dataset.id === selectedId) ?? null
-  const activeConditions = useMemo(
-    () => appliedFilter.conditions.length,
-    [appliedFilter],
+  const dataset = datasets.find((item) => item.id === datasetId)
+  const pageCount = Math.max(1, Math.ceil(total / 50))
+  const visibleSchema = useMemo(
+    () => visibleColumns.flatMap((name) => {
+      const column = dataset?.schema.find((item) => item.name === name)
+      return column ? [column] : []
+    }),
+    [dataset, visibleColumns],
   )
-  const shownColumns = selected
-    ? visibleColumns.map((name) => selected.columns.find((column) => column.name === name))
-      .filter((column): column is Column => column !== undefined)
-    : []
 
-  const reportError = (reason: unknown) => {
-    setError(reason instanceof Error ? reason.message : 'Something went wrong')
-    setMessage('')
-  }
-
-  const reloadDatasets = async (preferredId?: string) => {
-    const items = await api.datasets()
-    setDatasets(items)
-    const nextId = preferredId ?? (items.some((item) => item.id === selectedId) ? selectedId : items[0]?.id ?? '')
-    const nextDataset = items.find((item) => item.id === nextId)
-    if (nextDataset && nextId !== selectedId) {
-      setVisibleColumns(nextDataset.columns.map((column) => column.name))
-      setDetailFields(nextDataset.columns.map((column) => column.name))
-      setDetailLabels({})
-      setDetailSection('Record details')
-      setSortBy('')
-      setSortDirection('asc')
+  const refreshDatasets = useCallback(async (preferId?: string) => {
+    const result = await api.datasets()
+    setDatasets(result)
+    const nextId = preferId && result.some((item) => item.id === preferId) ? preferId : datasetId && result.some((item) => item.id === datasetId) ? datasetId : result[0]?.id ?? ''
+    if (nextId !== datasetId) {
+      const selected = result.find((item) => item.id === nextId)
+      setRows([])
+      setTotal(0)
       setPage(1)
-      setAppliedFilter(noFilters)
-      setDraftConditions([])
+      setActiveFilter(null)
+      setSelectedRecord(null)
+      setVisibleColumns(selected?.schema.map((column) => column.name) ?? [])
+      setLayout(selected?.schema.map((column) => ({ name: column.name, label: column.name, section: 'Record', visible: true })) ?? [])
     }
-    setSelectedId(nextId)
-    if (nextId) localStorage.setItem('databnb:selected-dataset', nextId)
-  }
+    setDatasetId(nextId)
+  }, [datasetId])
 
   useEffect(() => {
-    api.datasets().then((items) => {
-      setDatasets(items)
-      const preferredId = localStorage.getItem('databnb:selected-dataset')
-      const first = items.find((item) => item.id === preferredId) ?? items[0]
-      if (first) {
-        setVisibleColumns(first.columns.map((column) => column.name))
-        setDetailFields(first.columns.map((column) => column.name))
-        setSelectedId(first.id)
-        localStorage.setItem('databnb:selected-dataset', first.id)
-      } else {
-        setLoading(false)
-      }
-    }).catch(reportError)
+    let current = true
+    api.datasets().then((result) => {
+      if (!current) return
+      const initial = result[0]
+      setDatasets(result)
+      setDatasetId(initial?.id ?? '')
+      setVisibleColumns(initial?.schema.map((column) => column.name) ?? [])
+      setLayout(initial?.schema.map((column) => ({ name: column.name, label: column.name, section: 'Record', visible: true })) ?? [])
+    }).catch((cause) => { if (current) setError(message(cause)) })
+    return () => { current = false }
   }, [])
 
   useEffect(() => {
-    if (!selectedId) return
-    let cancelled = false
-    api.records(selectedId, {
-      page, pageSize: PAGE_SIZE, search, sortBy, sortDirection,
-      filters: appliedFilter.conditions.length ? appliedFilter : null,
-    }).then((data) => {
-      if (!cancelled) setResult(data)
-    }).catch((reason: unknown) => {
-      if (!cancelled) reportError(reason)
-    }).finally(() => {
-      if (!cancelled) setLoading(false)
-    })
-    return () => { cancelled = true }
-  }, [selectedId, page, search, sortBy, sortDirection, appliedFilter, refresh])
+    if (!datasetId) return
+    let current = true
+    const timer = window.setTimeout(() => {
+      api.records(datasetId, page, search, sortBy, sortDir, activeFilter)
+        .then((result) => {
+          if (current) { setRows(result.items); setTotal(result.total) }
+        })
+        .catch((cause) => { if (current) setError(message(cause)) })
+    }, 180)
+    return () => { current = false; window.clearTimeout(timer) }
+  }, [datasetId, page, search, sortBy, sortDir, activeFilter])
 
   useEffect(() => {
-    if (!selected) return
-    let cancelled = false
-    Promise.all([
-      api.configurations(selected.id, 'filter'),
-      api.configurations(selected.id, 'table'),
-      api.configurations(selected.id, 'detail'),
-    ]).then(([filters, tables, details]) => {
-      if (cancelled) return
-      setFilterConfigs(filters)
-      setTableConfigs(tables)
-      setDetailConfigs(details)
-      let preferred: Partial<Record<Configuration['kind'], string>> = {}
-      try {
-        preferred = JSON.parse(localStorage.getItem(`databnb:views:${selectedId}`) ?? '{}')
-      } catch {
-        preferred = {}
-      }
-      const preferredFilter = filters.find((item) => item.id === preferred.filter)
-      const preferredTable = tables.find((item) => item.id === preferred.table)
-      const preferredDetail = details.find((item) => item.id === preferred.detail)
-      setActiveConfig({
-        filter: preferredFilter?.id ?? '',
-        table: preferredTable?.id ?? '',
-        detail: preferredDetail?.id ?? '',
-      })
-      setFilterName(preferredFilter?.name ?? '')
-      setTableName(preferredTable?.name ?? '')
-      setDetailName(preferredDetail?.name ?? '')
-      if (preferredFilter) {
-        const definition = preferredFilter.definition as unknown as FilterGroup
-        const existing = new Set(selected.columns.map((column) => column.name))
-        const missing = filterColumns(definition).filter((column) => !existing.has(column))
-        if (missing.length) reportError(new Error(`Saved filter references missing columns: ${[...new Set(missing)].join(', ')}`))
-        setAppliedFilter(definition)
-        setFilterLogic(definition.logic ?? 'and')
-        setDraftConditions(definition.conditions.filter((item): item is Condition => 'column' in item))
-      }
-      if (preferredTable) {
-        const definition = preferredTable.definition as { visibleColumns?: string[]; sortBy?: string; sortDirection?: 'asc' | 'desc' }
-        const available = new Set(selected.columns.map((column) => column.name))
-        const missing = (definition.visibleColumns ?? []).filter((column) => !available.has(column))
-        if (missing.length) reportError(new Error(`Saved table view has missing columns: ${missing.join(', ')}`))
-        setVisibleColumns((definition.visibleColumns ?? []).filter((column) => available.has(column)))
-        setSortBy(definition.sortBy ?? '')
-        setSortDirection(definition.sortDirection ?? 'asc')
-      }
-      if (preferredDetail) {
-        const definition = preferredDetail.definition as {
-          fields?: string[]; labels?: Record<string, string>; section?: string; columns?: 1 | 2
-        }
-        const available = new Set(selected.columns.map((column) => column.name))
-        const missing = (definition.fields ?? []).filter((field) => !available.has(field))
-        if (missing.length) reportError(new Error(`Saved detail view has missing fields: ${missing.join(', ')}`))
-        setDetailFields((definition.fields ?? []).filter((field) => available.has(field)))
-        setDetailLabels(definition.labels ?? {})
-        setDetailSection(definition.section ?? 'Record details')
-        setDetailColumns(definition.columns ?? 2)
-      }
-    }).catch(reportError)
-    return () => { cancelled = true }
-  }, [selectedId, selected])
+    if (!datasetId) return
+    api.configurations(datasetId).then(setConfigurations).catch((cause) => setError(message(cause)))
+  }, [datasetId])
 
-  const resetResult = () => {
-    setPage(1)
-    setRefresh((value) => value + 1)
+  const refreshRecords = () => {
+    if (!datasetId) return
+    api.records(datasetId, page, search, sortBy, sortDir, activeFilter)
+      .then((result) => { setRows(result.items); setTotal(result.total) })
+      .catch((cause) => setError(message(cause)))
   }
 
-  const chooseDataset = (id: string) => {
-    const dataset = datasets.find((item) => item.id === id)
-    setSelectedId(id)
-    if (id) localStorage.setItem('databnb:selected-dataset', id)
-    if (dataset) {
-      setVisibleColumns(dataset.columns.map((column) => column.name))
-      setDetailFields(dataset.columns.map((column) => column.name))
-      setDetailLabels({})
-      setDetailSection('Record details')
-    }
-    setSortBy('')
-    setSortDirection('asc')
-    setPage(1)
-    setAppliedFilter(noFilters)
-    setDraftConditions([])
-    setActiveConfig({ filter: '', table: '', detail: '' })
-    setResult(null)
-    setRecord(null)
-    setCreating(false)
-    setLoading(true)
-    setError('')
-    setMessage('')
+  async function uploadPreview(file: File, selectedSheet?: string) {
+    const body = new FormData()
+    body.set('file', file)
+    if (selectedSheet) body.set('worksheet', selectedSheet)
+    const response = await fetch(`${import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api'}/imports/preview`, { method: 'POST', body })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail ?? 'Could not preview this file.')
+    setPreview(data)
   }
 
-  const selectFile = async (nextFile: File | null) => {
-    setFile(nextFile)
+  async function handleFile(file: File) {
+    setImportFile(file)
+    setImportName(file.name.replace(/\.[^.]+$/, ''))
     setPreview(null)
-    setSheet('')
-    if (!nextFile) return
-    setImportName(nextFile.name.replace(/\.(csv|xlsx)$/i, ''))
-    try {
-      const nextPreview = await api.preview(nextFile)
-      setPreview(nextPreview)
-      setSheet(nextPreview.sheets[0] ?? '')
-    } catch (reason) {
-      reportError(reason)
-    }
+    setWorksheet('')
+    setError('')
+    setBusy(true)
+    try { await uploadPreview(file) } catch (cause) { setError(message(cause)) } finally { setBusy(false) }
   }
 
-  const changeSheet = async (nextSheet: string) => {
-    setSheet(nextSheet)
-    if (!file) return
+  async function importDataset() {
+    if (!importFile || !importName.trim()) return
+    const body = new FormData()
+    body.set('file', importFile)
+    body.set('name', importName)
+    body.set('description', importDescription)
+    if (worksheet) body.set('worksheet', worksheet)
+    setBusy(true)
+    setError('')
     try {
-      setPreview(await api.preview(file, nextSheet))
-    } catch (reason) {
-      reportError(reason)
-    }
-  }
-
-  const importFile = async () => {
-    if (!file || !importName.trim()) return
-    setLoading(true)
-    try {
-      const dataset = await api.import(file, importName.trim(), description, sheet || undefined)
-      await reloadDatasets(dataset.id)
-      setShowImport(false)
-      setFile(null)
+      const response = await fetch(`${import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api'}/imports`, { method: 'POST', body })
+      const imported = await response.json()
+      if (!response.ok) throw new Error(imported.detail ?? 'Import failed.')
+      setModal(null)
       setPreview(null)
-      setMessage(`“${dataset.name}” imported successfully.`)
-      setError('')
-    } catch (reason) {
-      reportError(reason)
-    } finally {
-      setLoading(false)
-    }
+      setImportFile(null)
+      await refreshDatasets(imported.id)
+      setNotice(`${imported.row_count.toLocaleString()} records imported.`)
+    } catch (cause) { setError(message(cause)) } finally { setBusy(false) }
   }
 
-  const addCondition = () => {
-    const first = selected?.columns[0]
-    if (!first) return
-    setDraftConditions((items) => [...items, {
-      column: first.name,
-      operator: filterOperators(first)[0][0],
-      value: '',
-    }])
-  }
-
-  const changeCondition = (index: number, update: Partial<Condition>) => {
-    setDraftConditions((items) => items.map((condition, itemIndex) => {
-      if (itemIndex !== index) return condition
-      const next = { ...condition, ...update }
-      if (update.column) next.operator = filterOperators(selected?.columns.find((column) => column.name === update.column))[0][0]
-      return next
-    }))
-  }
-
-  const applyFilters = () => {
-    setLoading(true)
-    setAppliedFilter({
-      logic: filterLogic,
-      conditions: draftConditions.filter((condition) => condition.column && condition.operator)
-        .map((condition) => condition.operator === 'between'
-          ? { ...condition, value: String(condition.value ?? '').split(',').map((value) => value.trim()) }
-          : condition),
-    })
+  function applyFilter() {
+    const validConditions = conditions.filter((item) => item.column)
+    if (!validConditions.length) return
+    setActiveFilter({ type: 'group', logic, conditions: validConditions })
     setPage(1)
+    setFilterOpen(false)
   }
 
-  const draftFilterDefinition = {
-    logic: filterLogic,
-    conditions: draftConditions.map((condition) => condition.operator === 'between'
-      ? { ...condition, value: String(condition.value ?? '').split(',').map((value) => value.trim()) }
-      : condition),
+  function saveConfig() {
+    if (!datasetId || !saveName.trim()) return
+    const config = (savePurpose === 'rename' || savePurpose === 'duplicate') && configToUpdate ? configToUpdate.config :
+      saveKind === 'filter' ? { filter: activeFilter } :
+      saveKind === 'table' ? { visible_columns: visibleColumns, sort_by: sortBy, sort_dir: sortDir } :
+      { fields: layout }
+    setBusy(true)
+    const id = savePurpose === 'update' || savePurpose === 'rename' ? configToUpdate?.id : undefined
+    api.saveConfiguration(datasetId, { kind: saveKind, name: saveName, config }, id)
+      .then(async () => {
+        setNotice(savePurpose === 'rename' ? 'Configuration renamed.' : savePurpose === 'update' ? 'Configuration updated.' : `${saveKind === 'filter' ? 'Filter' : saveKind === 'table' ? 'Table view' : 'Detail layout'} saved.`)
+        setModal(null)
+        setSaveName('')
+        setConfigToUpdate(null)
+        setSavePurpose('create')
+        setConfigurations(await api.configurations(datasetId))
+      })
+      .catch((cause) => setError(message(cause)))
+      .finally(() => setBusy(false))
   }
 
-  const saveConfiguration = async (
-    kind: Configuration['kind'],
-    name: string,
-    definition: Record<string, unknown>,
-    existingId?: string,
-  ) => {
-    if (!selected || !name.trim()) return
-    try {
-      const saved = existingId
-        ? await api.updateConfiguration(selected.id, existingId, name.trim(), definition)
-        : await api.saveConfiguration(selected.id, kind, name.trim(), definition)
-      const configs = await api.configurations(selected.id, kind)
-      if (kind === 'filter') setFilterConfigs(configs)
-      if (kind === 'table') setTableConfigs(configs)
-      if (kind === 'detail') setDetailConfigs(configs)
-      setActiveConfig((current) => ({ ...current, [kind]: saved.id }))
-      const key = `databnb:views:${selected.id}`
-      let active: Partial<Record<Configuration['kind'], string>> = {}
-      try {
-        active = JSON.parse(localStorage.getItem(key) ?? '{}')
-      } catch {
-        active = {}
+  function loadConfiguration(configuration: SavedConfiguration) {
+    if (configuration.kind === 'filter') {
+      const filter = (configuration.config.filter as FilterGroup | null) ?? null
+      setActiveFilter(filter)
+      if (filter) {
+        setLogic(filter.logic)
+        setConditions(filter.conditions.map((condition) => condition as FilterCondition))
       }
-      localStorage.setItem(key, JSON.stringify({ ...active, [kind]: saved.id }))
-      if (kind === 'filter') setFilterName('')
-      if (kind === 'table') setTableName('')
-      if (kind === 'detail') setDetailName('')
-      setMessage(`${kind[0].toUpperCase()}${kind.slice(1)} view saved.`)
-      setError('')
-    } catch (reason) {
-      reportError(reason)
-    }
-  }
-
-  const loadConfiguration = (kind: Configuration['kind'], id: string) => {
-    setActiveConfig((current) => ({ ...current, [kind]: id }))
-    if (selected) {
-      const key = `databnb:views:${selected.id}`
-      let active: Partial<Record<Configuration['kind'], string>> = {}
-      try {
-        active = JSON.parse(localStorage.getItem(key) ?? '{}')
-      } catch {
-        active = {}
-      }
-      if (id) active[kind] = id
-      else delete active[kind]
-      localStorage.setItem(key, JSON.stringify(active))
-    }
-    const config = [...filterConfigs, ...tableConfigs, ...detailConfigs].find((item) => item.id === id)
-    if (!config) {
-      if (kind === 'filter') setFilterName('')
-      if (kind === 'table') setTableName('')
-      if (kind === 'detail') setDetailName('')
-      if (kind === 'filter') {
-        setAppliedFilter(noFilters)
-        setDraftConditions([])
-        setFilterLogic('and')
-        setPage(1)
-      }
-      if (kind === 'table' && selected) {
-        setVisibleColumns(selected.columns.map((column) => column.name))
-        setSortBy('')
-        setSortDirection('asc')
-        resetResult()
-      }
-      if (kind === 'detail' && selected) {
-        setDetailFields(selected.columns.map((column) => column.name))
-        setDetailLabels({})
-        setDetailSection('Record details')
-        setDetailColumns(2)
-      }
-      return
-    }
-    if (kind === 'filter') setFilterName(config.name)
-    if (kind === 'table') setTableName(config.name)
-    if (kind === 'detail') setDetailName(config.name)
-    if (kind === 'filter') {
-      const definition = config.definition as unknown as FilterGroup
-      const available = new Set(selected?.columns.map((column) => column.name))
-      const missing = filterColumns(definition).filter((column) => !available?.has(column))
-      if (missing.length) reportError(new Error(`Saved filter references missing columns: ${[...new Set(missing)].join(', ')}`))
-      setAppliedFilter(definition)
-      setFilterLogic(definition.logic ?? 'and')
-      setDraftConditions(definition.conditions.filter((item): item is Condition => 'column' in item))
       setPage(1)
+    } else if (configuration.kind === 'table') {
+      const names = configuration.config.visible_columns as string[]
+      setVisibleColumns(names.filter((name) => dataset?.schema.some((column) => column.name === name)))
+      setSortBy((configuration.config.sort_by as string | null) ?? null)
+      setSortDir((configuration.config.sort_dir as string) ?? 'asc')
+    } else {
+      setLayout(configuration.config.fields as typeof layout)
     }
-    if (kind === 'table') {
-      const definition = config.definition as { visibleColumns?: string[]; sortBy?: string; sortDirection?: 'asc' | 'desc' }
-      const available = new Set(selected?.columns.map((column) => column.name))
-      const missing = (definition.visibleColumns ?? []).filter((column) => !available?.has(column))
-      if (missing.length) reportError(new Error(`Saved table view has missing columns: ${missing.join(', ')}`))
-      setVisibleColumns((definition.visibleColumns ?? []).filter((column) => available.has(column)))
-      setSortBy(definition.sortBy ?? '')
-      setSortDirection(definition.sortDirection ?? 'asc')
-      resetResult()
-    }
-    if (kind === 'detail') {
-      const definition = config.definition as {
-        fields?: string[]; labels?: Record<string, string>; section?: string; columns?: 1 | 2
-      }
-      const available = new Set(selected?.columns.map((column) => column.name))
-      const missing = (definition.fields ?? []).filter((field) => !available?.has(field))
-      if (missing.length) reportError(new Error(`Saved detail view has missing fields: ${missing.join(', ')}`))
-      setDetailFields((definition.fields ?? []).filter((field) => available.has(field)))
-      setDetailLabels(definition.labels ?? {})
-      setDetailSection(definition.section ?? 'Record details')
-      setDetailColumns(definition.columns ?? 2)
-    }
+    setNotice(`Loaded “${configuration.name}”.`)
   }
 
-  const removeConfiguration = async (kind: Configuration['kind'], id: string) => {
-    if (!selected || !window.confirm('Delete this saved view?')) return
+  async function deleteConfig(configuration: SavedConfiguration) {
+    if (!window.confirm(`Delete saved ${configuration.kind} “${configuration.name}”?`)) return
     try {
-      await api.deleteConfiguration(selected.id, id)
-      if (kind === 'filter') setFilterConfigs((items) => items.filter((item) => item.id !== id))
-      if (kind === 'table') setTableConfigs((items) => items.filter((item) => item.id !== id))
-      if (kind === 'detail') setDetailConfigs((items) => items.filter((item) => item.id !== id))
-      if (activeConfig[kind] === id) {
-        setActiveConfig((current) => ({ ...current, [kind]: '' }))
-        if (selected) {
-          const key = `databnb:views:${selected.id}`
-          let active: Partial<Record<Configuration['kind'], string>> = {}
-          try {
-            active = JSON.parse(localStorage.getItem(key) ?? '{}')
-          } catch {
-            active = {}
-          }
-          delete active[kind]
-          localStorage.setItem(key, JSON.stringify(active))
-        }
-      }
-    } catch (reason) {
-      reportError(reason)
-    }
+      await api.deleteConfiguration(datasetId, configuration.id)
+      setConfigurations(await api.configurations(datasetId))
+    } catch (cause) { setError(message(cause)) }
   }
 
-  const openRecord = (row: RecordRow) => {
-    setRecord(row)
-    setDraftRecord(Object.fromEntries(selected?.columns.map((column) => [column.name, row[column.name]]) ?? []))
-    setEditing(false)
-    setCreating(false)
+  function openRecord(row: RecordRow, isNew = false) {
+    setSelectedRecord(row)
+    setRecordIsNew(isNew)
+    setEditing(isNew)
+    setRecordValues(Object.fromEntries((dataset?.schema ?? []).map((column) => [column.name, row[column.name] == null ? '' : String(row[column.name])])))
+    setLayoutOpen(false)
   }
 
-  const startCreateRecord = () => {
-    if (!selected) return
-    setRecord(null)
-    setDraftRecord(Object.fromEntries(selected.columns.map((column) => [column.name, null])))
-    setEditing(false)
-    setCreating(true)
-  }
-
-  const moveColumn = (columnName: string, distance: -1 | 1) => {
-    setVisibleColumns((items) => {
-      const index = items.indexOf(columnName)
-      const nextIndex = index + distance
-      if (index < 0 || nextIndex < 0 || nextIndex >= items.length) return items
-      const reordered = [...items]
-      ;[reordered[index], reordered[nextIndex]] = [reordered[nextIndex], reordered[index]]
-      return reordered
-    })
-  }
-
-  const moveDetailField = (fieldName: string, distance: -1 | 1) => {
-    setDetailFields((items) => {
-      const index = items.indexOf(fieldName)
-      const nextIndex = index + distance
-      if (index < 0 || nextIndex < 0 || nextIndex >= items.length) return items
-      const reordered = [...items]
-      ;[reordered[index], reordered[nextIndex]] = [reordered[nextIndex], reordered[index]]
-      return reordered
-    })
-  }
-
-  const navigateRecord = (distance: -1 | 1) => {
-    const index = result?.records.findIndex((item) => item._record_id === record?._record_id) ?? -1
-    const next = result?.records[index + distance]
-    if (next) openRecord(next)
-  }
-
-  const closeDetail = () => {
-    const changed = JSON.stringify(draftRecord) !== JSON.stringify(
-      Object.fromEntries(selected?.columns.map((column) => [column.name, record?.[column.name]]) ?? []),
-    )
-    if (editing && changed && !window.confirm('Discard your unsaved changes?')) return
-    setRecord(null)
-    setCreating(false)
-    setEditing(false)
-  }
-
-  const saveRecord = async () => {
-    if (!selected) return
+  async function saveRecord() {
+    if (!datasetId) return
+    const values = Object.fromEntries(Object.entries(recordValues).map(([key, value]) => [key, value === '' ? null : value]))
     try {
-      const saved = await api.saveRecord(selected.id, draftRecord, creating ? undefined : record?._record_id)
-      setRecord(saved)
-      setDraftRecord(Object.fromEntries(selected.columns.map((column) => [column.name, saved[column.name]])))
+      const saved = await api.saveRecord(datasetId, values, recordIsNew ? undefined : selectedRecord?._record_id)
+      setSelectedRecord(saved)
       setEditing(false)
-      setCreating(false)
-      setMessage(creating ? 'Record added.' : 'Record changes saved.')
-      setError('')
-      resetResult()
-      await reloadDatasets(selected.id)
-    } catch (reason) {
-      reportError(reason)
-    }
+      setRecordIsNew(false)
+      refreshRecords()
+      await refreshDatasets(datasetId)
+      setNotice('Record saved.')
+    } catch (cause) { setError(message(cause)) }
   }
 
-  const deleteRecord = async () => {
-    if (!selected || !record || !window.confirm('Permanently delete this record?')) return
+  async function removeSelectedRecord() {
+    if (!selectedRecord || !window.confirm('Delete this record permanently?')) return
     try {
-      await api.deleteRecord(selected.id, record._record_id)
-      closeDetail()
-      setRecord(null)
-      setMessage('Record deleted.')
-      resetResult()
-      await reloadDatasets(selected.id)
-    } catch (reason) {
-      reportError(reason)
-    }
+      await api.deleteRecord(datasetId, selectedRecord._record_id)
+      setSelectedRecord(null)
+      refreshRecords()
+      await refreshDatasets(datasetId)
+      setNotice('Record deleted.')
+    } catch (cause) { setError(message(cause)) }
   }
 
-  const deleteDataset = async () => {
-    if (!selected || !window.confirm(`Delete “${selected.name}” and its saved views? This cannot be undone.`)) return
-    try {
-      const removedId = selected.id
-      await api.deleteDataset(removedId)
-      localStorage.removeItem(`databnb:views:${removedId}`)
-      setResult(null)
-      setRecord(null)
-      await reloadDatasets()
-      if (!datasets.some((item) => item.id !== removedId)) {
-        localStorage.removeItem('databnb:selected-dataset')
-      }
-      setMessage(`“${selected.name}” was deleted.`)
-      setError('')
-    } catch (reason) {
-      reportError(reason)
-    }
+  function exportData(format: 'csv' | 'xlsx', scope: 'all' | 'filtered') {
+    const query = new URLSearchParams({ format, scope, search: scope === 'filtered' ? search : '' })
+    if (activeFilter) query.set('filters', JSON.stringify(activeFilter))
+    if (exportVisibleOnly) query.set('columns', JSON.stringify(visibleColumns))
+    const url = `${import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api'}/datasets/${datasetId}/export?${query}`
+    window.open(url, '_blank', 'noopener,noreferrer')
   }
 
-  const exportRecords = async (format: 'csv' | 'xlsx') => {
-    if (!selected) return
-    try {
-      const blob = await api.export(
-        selected.id, format, search,
-        appliedFilter.conditions.length ? appliedFilter : null,
-        shownColumns.map((column) => column.name),
-      )
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = `${selected.name}.${format}`
-      link.click()
-      URL.revokeObjectURL(url)
-      setMessage(`Exported all ${result?.total ?? 0} matching records as ${format.toUpperCase()}.`)
-      setError('')
-    } catch (reason) {
-      reportError(reason)
-    }
+  function setConditionColumn(index: number, name: string) {
+    const selected = dataset?.schema.find((column) => column.name === name)
+    const options = operators[selected?.type ?? 'text'] ?? operators.text
+    setConditions((current) => current.map((item, row) => row === index
+      ? { type: 'condition', column: name, operator: options[0], value: '' }
+      : item))
   }
 
-  const renderEditor = (column: Column, value: unknown, onChange: (value: unknown) => void) => {
-    if (column.type === 'BOOLEAN') {
-      return (
-        <select value={value === true ? 'true' : value === false ? 'false' : ''} onChange={(event) => onChange(event.target.value === '' ? null : event.target.value === 'true')}>
-          <option value="">Empty</option><option value="true">True</option><option value="false">False</option>
-        </select>
-      )
-    }
-    return (
-      <input
-        type={column.type === 'BIGINT' || column.type === 'DOUBLE' ? 'number' : 'text'}
-        step={column.type === 'DOUBLE' ? 'any' : undefined}
-        value={value === null || value === undefined ? '' : String(value)}
-        onChange={(event) => onChange(event.target.value === '' ? null : event.target.value)}
-      />
-    )
+  function updateCondition(index: number, update: Partial<FilterCondition>) {
+    setConditions((current) => current.map((item, row) => row === index ? { ...item, ...update } : item))
   }
 
+  function openSave(kind: 'filter' | 'table' | 'detail') {
+    setSaveKind(kind)
+    setSaveName('')
+    setConfigToUpdate(null)
+    setSavePurpose('create')
+    setModal('save')
+  }
+
+  function editSavedConfiguration(configuration: SavedConfiguration, purpose: 'update' | 'rename' | 'duplicate') {
+    setConfigToUpdate(configuration)
+    setSaveKind(configuration.kind)
+    setSaveName(purpose === 'duplicate' ? `${configuration.name} copy` : configuration.name)
+    setSavePurpose(purpose)
+    setModal('save')
+  }
+
+  function selectDataset(id: string) {
+    const selected = datasets.find((item) => item.id === id)
+    setRows([])
+    setTotal(0)
+    setPage(1)
+    setActiveFilter(null)
+    setSelectedRecord(null)
+    setVisibleColumns(selected?.schema.map((column) => column.name) ?? [])
+    setLayout(selected?.schema.map((column) => ({ name: column.name, label: column.name, section: 'Record', visible: true })) ?? [])
+    setDatasetId(id)
+  }
+
+  function toggleColumn(name: string) {
+    setVisibleColumns((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name])
+  }
+
+  function moveColumn(index: number, step: number) {
+    const next = [...visibleColumns]
+    const target = index + step
+    if (target < 0 || target >= next.length) return
+    ;[next[index], next[target]] = [next[target], next[index]]
+    setVisibleColumns(next)
+  }
+
+  const filterConfigurations = configurations.filter((item) => item.kind === 'filter')
+  const tableConfigurations = configurations.filter((item) => item.kind === 'table')
+  const detailConfigurations = configurations.filter((item) => item.kind === 'detail')
   return (
-    <div className="workspace">
+    <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="/" aria-label="DataBNB home">
-          <span className="brand-mark">D</span>
-          <span>DataBNB<small>Multiple sources. One workspace.</small></span>
+        <a className="brand" href="#" aria-label="DataBNB home">
+          <span className="brand-mark">d</span><span>data<span className="brand-light">bnb</span></span>
         </a>
-        <div className="sidebar-heading">
-          <span>YOUR DATA</span>
-          <button className="icon-button" aria-label="Import a dataset" onClick={() => setShowImport(true)}>＋</button>
-        </div>
-        <button className="primary sidebar-import" onClick={() => setShowImport(true)}>＋ &nbsp;Import data</button>
-        <div className="dataset-list" aria-label="Datasets">
-          {datasets.map((dataset) => (
-            <button
-              key={dataset.id}
-              className={`dataset-item ${selectedId === dataset.id ? 'selected' : ''}`}
-              onClick={() => chooseDataset(dataset.id)}
-            >
-              <span className="dataset-icon">▦</span>
-              <span className="dataset-copy"><strong>{dataset.name}</strong><small>{dataset.row_count.toLocaleString()} rows · {dataset.columns.length} columns</small></span>
+        <div className="side-section-title">WORKSPACE</div>
+        <div className="side-label">YOUR DATASETS <span>{datasets.length}</span></div>
+        <nav className="dataset-nav" aria-label="Datasets">
+          {datasets.map((item) => (
+            <button className={`dataset-link ${item.id === datasetId ? 'selected' : ''}`} key={item.id} onClick={() => selectDataset(item.id)}>
+              <span className="dataset-icon">▤</span><span className="dataset-name">{item.name}</span>
+              <span className="dataset-count">{item.row_count.toLocaleString()}</span>
             </button>
           ))}
-          {!datasets.length && <p className="sidebar-empty">Your imported datasets will appear here.</p>}
+          {datasets.length === 0 && <p className="sidebar-empty">Your data will show up here.</p>}
+        </nav>
+        <button className="new-source" onClick={() => { setError(''); setModal('import') }}><span>＋</span> Import data</button>
+        <div className="sidebar-bottom">
+          <span className="local-dot" /> Local workspace
+          <div>Your data stays on this device</div>
         </div>
-        <div className="sidebar-footer"><span className="status-dot" /> Local workspace</div>
       </aside>
 
       <main className="main">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Workspace</span><span className="crumb-divider">/</span><strong>{selected?.name ?? 'Overview'}</strong></div>
-          <div className="top-actions"><span className="local-badge"><span className="status-dot" /> Stored locally</span><button className="primary" onClick={() => setShowImport(true)}>＋ Import data</button></div>
+          <div className="breadcrumb"><span>Workspace</span><b>/</b><strong>{dataset?.name ?? 'Overview'}</strong></div>
+          <div className="topbar-right"><span className="local-badge"><i /> Local only</span><span className="avatar" aria-label="Local workspace">F</span></div>
         </header>
 
-        {!selected ? (
-          <section className="welcome">
-            <div className="welcome-mark">D</div>
-            <p className="eyebrow">A calm place for your data</p>
-            <h1>Bring your data together.</h1>
-            <p>Import a CSV or Excel file to start exploring your data in one simple workspace.</p>
-            <button className="primary" onClick={() => setShowImport(true)}>＋ &nbsp;Import your first file</button>
-            <span>CSV and XLSX · Up to 25 MB · Stored on this computer</span>
-          </section>
-        ) : (
-          <div className="content">
-            <div className="page-heading">
-              <div><p className="eyebrow">DATASET</p><h1>{selected.name}</h1><p className="dataset-description">{selected.description || `Imported from ${selected.source_filename}`}</p></div>
-              <div className="heading-actions"><button className="text-button danger" onClick={() => void deleteDataset()}>Delete dataset</button><button className="secondary" onClick={() => setShowImport(true)}>＋ Add dataset</button></div>
-            </div>
-            <div className="dataset-stats">
-              <div><strong>{selected.row_count.toLocaleString()}</strong><span>records</span></div>
-              <div><strong>{selected.columns.length}</strong><span>columns</span></div>
-              <div><strong>{selected.source_type.toUpperCase()}</strong><span>source type</span></div>
-              <div><strong>{new Date(selected.created_at).toLocaleDateString()}</strong><span>imported</span></div>
-            </div>
+        {error && !modal && <div className="notice error-notice" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
+        {notice && <div className="notice success-notice" role="status">{notice}<button onClick={() => setNotice('')}>×</button></div>}
 
-            <section className="toolbar" aria-label="Table controls">
-              <label className="searchbox"><span aria-hidden="true">⌕</span><input aria-label="Search all records" placeholder="Search all records…" value={search} onChange={(event) => { setLoading(true); setSearch(event.target.value); setPage(1) }} /><kbd>↵</kbd></label>
-              <button className={`secondary ${activeConditions ? 'active-button' : ''}`} onClick={() => document.getElementById('filter-builder')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>☷ &nbsp;Filter{activeConditions ? ` · ${activeConditions}` : ''}</button>
-              <button className="secondary" onClick={startCreateRecord}>＋ Add record</button>
-              <details className="menu">
-                <summary className="secondary">Export &nbsp;⌄</summary>
-                <div className="menu-popover"><button onClick={() => void exportRecords('csv')}>Export matching records · CSV</button><button onClick={() => void exportRecords('xlsx')}>Export matching records · Excel</button></div>
-              </details>
-            </section>
-
-            <div className="view-controls">
-              <div className="saved-control"><label htmlFor="saved-filter">Saved filters</label><select id="saved-filter" value={activeConfig.filter} onChange={(event) => loadConfiguration('filter', event.target.value)}><option value="">Choose a filter…</option>{filterConfigs.map((config) => <option key={config.id} value={config.id}>{config.name}</option>)}</select>{activeConfig.filter && <button className="text-button danger" onClick={() => void removeConfiguration('filter', activeConfig.filter)}>Delete</button>}</div>
-              <div className="saved-control"><label htmlFor="saved-table">Table views</label><select id="saved-table" value={activeConfig.table} onChange={(event) => loadConfiguration('table', event.target.value)}><option value="">Choose a view…</option>{tableConfigs.map((config) => <option key={config.id} value={config.id}>{config.name}</option>)}</select>{activeConfig.table && <button className="text-button danger" onClick={() => void removeConfiguration('table', activeConfig.table)}>Delete</button>}</div>
-            </div>
-
-            <section id="filter-builder" className="filter-builder">
-              <div className="filter-heading"><div><span className="section-icon">☷</span><strong>Filter this dataset</strong><span className="muted">Conditions apply across all records</span></div><div className="logic-toggle" aria-label="Combine filter conditions">{(['and', 'or'] as const).map((logic) => <button key={logic} className={filterLogic === logic ? 'chosen' : ''} onClick={() => setFilterLogic(logic)}>{logic.toUpperCase()}</button>)}</div></div>
-              {draftConditions.map((condition, index) => {
-                const operators = filterOperators(selected.columns.find((column) => column.name === condition.column))
-                const noValue = ['is_null', 'is_not_null', 'is_empty', 'is_not_empty', 'true', 'false'].includes(condition.operator)
-                return <div className="condition-row" key={`${index}-${condition.column}`}>
-                  <span className="condition-number">{index + 1}</span>
-                  <select aria-label={`Filter ${index + 1} column`} value={condition.column} onChange={(event) => changeCondition(index, { column: event.target.value })}>{selected.columns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select>
-                  <select aria-label={`Filter ${index + 1} operator`} value={condition.operator} onChange={(event) => changeCondition(index, { operator: event.target.value })}>{operators.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
-                  {!noValue && <input aria-label={`Filter ${index + 1} value`} type="text" placeholder={condition.operator === 'between' ? 'Value 1, value 2' : 'Enter a value'} value={Array.isArray(condition.value) ? condition.value.join(', ') : String(condition.value ?? '')} onChange={(event) => changeCondition(index, { value: event.target.value })} />}
-                  <button className="icon-button remove-condition" aria-label={`Remove filter ${index + 1}`} onClick={() => setDraftConditions((items) => items.filter((_, itemIndex) => itemIndex !== index))}>×</button>
+        {dataset ? (
+          <>
+            <section className="workspace-heading">
+              <div>
+                <div className="eyebrow"><span className="source-dot" /> SPREADSHEET · {dataset.source_filename}</div>
+                <h1>{dataset.name}</h1>
+                <p>{dataset.description || 'Your imported data, ready to explore.'}</p>
+                <div className="dataset-stats"><span><b>{dataset.row_count.toLocaleString()}</b> records</span><span className="stat-divider" /><span><b>{dataset.schema.length}</b> fields</span></div>
+              </div>
+              <div className="heading-actions">
+                <div className="relative">
+                  <button className="button secondary" onClick={() => setExportOpen(!exportOpen)}>↓ Export data</button>
+                  {exportOpen && <div className="popover export-popover">
+                    <div className="popover-heading">Choose export scope</div>
+                    <label className="export-option"><input type="radio" name="export-scope" checked={exportScope === 'all'} onChange={() => setExportScope('all')} /><span>Full dataset<small>{dataset.row_count.toLocaleString()} records</small></span></label>
+                    <label className="export-option"><input type="radio" name="export-scope" checked={exportScope === 'filtered'} onChange={() => setExportScope('filtered')} /><span>Filtered results<small>{total.toLocaleString()} matching records</small></span></label>
+                    <label className="export-visible"><input type="checkbox" checked={exportVisibleOnly} onChange={(event) => setExportVisibleOnly(event.target.checked)} /> Only visible columns</label>
+                    <div className="export-buttons"><button className="button secondary" disabled={exportVisibleOnly && visibleColumns.length === 0} onClick={() => { exportData('csv', exportScope); setExportOpen(false) }}>Download CSV</button><button className="button primary" disabled={exportVisibleOnly && visibleColumns.length === 0} onClick={() => { exportData('xlsx', exportScope); setExportOpen(false) }}>Download Excel</button></div>
+                  </div>}
                 </div>
-              })}
-              <div className="filter-footer"><button className="text-button" onClick={addCondition}>＋ Add condition</button><div><button className="text-button" onClick={() => { setDraftConditions([]); setAppliedFilter(noFilters); setPage(1) }}>Clear</button><button className="primary small" onClick={applyFilters}>Apply filters</button></div></div>
-              {draftConditions.length > 0 && <div className="save-view-row"><input aria-label="Saved filter name" placeholder="Name this filter…" value={filterName} onChange={(event) => setFilterName(event.target.value)} /><button className="secondary small" disabled={!filterName.trim()} onClick={() => void saveConfiguration('filter', filterName, draftFilterDefinition, activeConfig.filter || undefined)}>{activeConfig.filter ? 'Update filter' : 'Save filter'}</button>{activeConfig.filter && <button className="text-button" disabled={!filterName.trim()} onClick={() => void saveConfiguration('filter', filterName, draftFilterDefinition)}>Save as new</button>}</div>}
-              {result && <p className="match-count">{result.total.toLocaleString()} matching {result.total === 1 ? 'record' : 'records'}</p>}
+                <button className="button primary" onClick={() => openRecord({} as RecordRow, true)}>＋ Add record</button>
+              </div>
             </section>
 
-            <div className="table-settings">
-              <details className="column-menu"><summary className="text-button">Columns ({visibleColumns.length}/{selected.columns.length})</summary><div className="column-popover">{selected.columns.map((column) => <div className="column-option" key={column.name}><label><input type="checkbox" checked={visibleColumns.includes(column.name)} onChange={(event) => setVisibleColumns((items) => event.target.checked ? [...items, column.name] : items.filter((item) => item !== column.name))} />{column.name}</label><span><button aria-label={`Move ${column.name} earlier`} disabled={!visibleColumns.includes(column.name) || visibleColumns.indexOf(column.name) === 0} onClick={() => moveColumn(column.name, -1)}>↑</button><button aria-label={`Move ${column.name} later`} disabled={!visibleColumns.includes(column.name) || visibleColumns.indexOf(column.name) === visibleColumns.length - 1} onClick={() => moveColumn(column.name, 1)}>↓</button></span></div>)}<button className="text-button" onClick={() => loadConfiguration('table', '')}>Restore defaults</button></div></details>
-              <div className="saved-control inline"><label htmlFor="detail-layout">Record layout</label><select id="detail-layout" value={activeConfig.detail} onChange={(event) => loadConfiguration('detail', event.target.value)}><option value="">Default layout</option>{detailConfigs.map((config) => <option key={config.id} value={config.id}>{config.name}</option>)}</select></div>
-              <span className="scope-note">Showing {result?.records.length ?? 0} of {result?.total ?? 0} matching records</span>
-            </div>
+            <section className="data-panel">
+              <div className="panel-title">
+                <div><h2>Data table</h2><span className="panel-count">{total.toLocaleString()} {activeFilter || search ? 'matching' : 'total'}</span></div>
+                <div className="panel-actions">
+                  <div className="saved-select-wrap">
+                    <select aria-label="Load saved filter" defaultValue="" onChange={(event) => { const item = filterConfigurations.find((config) => config.id === event.target.value); if (item) loadConfiguration(item); event.target.value = '' }}>
+                      <option value="">Saved filters</option>{filterConfigurations.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="saved-select-wrap">
+                    <select aria-label="Load table view" defaultValue="" onChange={(event) => { const item = tableConfigurations.find((config) => config.id === event.target.value); if (item) loadConfiguration(item); event.target.value = '' }}>
+                      <option value="">Table views</option>{tableConfigurations.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+                    </select>
+                  </div>
+                  <button className="text-button manage-button" onClick={() => setModal('manage')}>Manage saved</button>
+                  <button className={`icon-button ${filterOpen ? 'active' : ''}`} aria-label="Open filters" onClick={() => setFilterOpen(!filterOpen)}>☷ <span>Filter</span>{activeFilter && <i className="filter-dot" />}</button>
+                  <div className="relative">
+                    <button className={`icon-button ${columnOpen ? 'active' : ''}`} onClick={() => setColumnOpen(!columnOpen)}>▥ <span>Columns</span></button>
+                    {columnOpen && <div className="popover column-popover">
+                      <div className="popover-heading">Visible columns</div>
+                      {visibleColumns.map((name, index) => <div className="column-row" key={name}>
+                        <label><input type="checkbox" checked onChange={() => toggleColumn(name)} />{name}</label>
+                        <span><button aria-label={`Move ${name} up`} onClick={() => moveColumn(index, -1)}>↑</button><button aria-label={`Move ${name} down`} onClick={() => moveColumn(index, 1)}>↓</button></span>
+                      </div>)}
+                      {dataset.schema.filter((column) => !visibleColumns.includes(column.name)).map((column) => <label className="hidden-column" key={column.name}><input type="checkbox" onChange={() => toggleColumn(column.name)} />{column.name}</label>)}
+                      <button className="text-button reset-columns" onClick={() => setVisibleColumns(dataset.schema.map((column) => column.name))}>Restore all columns</button>
+                    </div>}
+                  </div>
+                </div>
+              </div>
 
-            <div className="table-frame">
-              {loading && <div className="loading-bar" />}
-              <div className="table-scroll"><table><thead><tr><th className="row-number">#</th>{shownColumns.map((column) => <th key={column.name}><button className="sort-button" onClick={() => { setLoading(true); setSortBy(column.name); setSortDirection(sortBy === column.name && sortDirection === 'asc' ? 'desc' : 'asc'); setPage(1) }}>{column.name}{sortBy === column.name ? sortDirection === 'asc' ? ' ↑' : ' ↓' : ''}</button></th>)}<th className="row-action" /></tr></thead>
-                <tbody>
-                  {result?.records.map((row, index) => <tr key={row._record_id} onClick={() => openRecord(row)} onKeyDown={(event) => { if (event.key === 'Enter') openRecord(row) }} tabIndex={0} aria-label={`Open record ${index + 1}`}>
-                    <td className="row-number">{(page - 1) * PAGE_SIZE + index + 1}</td>{shownColumns.map((column) => <td key={column.name} title={showValue(row[column.name])}>{showValue(row[column.name])}</td>)}<td className="row-action">›</td>
-                  </tr>)}
-                  {!loading && result?.records.length === 0 && <tr><td className="empty-cell" colSpan={shownColumns.length + 2}>No records match this view. Try another search or clear your filters.</td></tr>}
-                </tbody>
-              </table></div>
-              <footer className="table-footer"><span>{result?.total.toLocaleString() ?? '—'} records</span><div className="pagination"><button className="secondary page-button" aria-label="Previous page" disabled={page <= 1} onClick={() => { setLoading(true); setPage((value) => Math.max(1, value - 1)) }}>‹</button><span>Page {page} of {Math.max(1, result?.pages ?? 1)}</span><button className="secondary page-button" aria-label="Next page" disabled={page >= (result?.pages ?? 1)} onClick={() => { setLoading(true); setPage((value) => value + 1) }}>›</button></div></footer>
-            </div>
+              {filterOpen && <div className="filter-builder">
+                <div className="filter-builder-title"><div><strong>Filter records</strong><span>Filters run across all {dataset.row_count.toLocaleString()} records.</span></div><button className="close-button" onClick={() => setFilterOpen(false)}>×</button></div>
+                {conditions.map((item, index) => {
+                  const columnType = dataset.schema.find((column) => column.name === item.column)?.type ?? 'text'
+                  const valueType = columnType === 'integer' || columnType === 'number' ? 'number' : columnType === 'date' || columnType === 'datetime' ? 'date' : 'text'
+                  return <div className="filter-controls" key={index}>
+                    {index === 0
+                      ? <select aria-label="Filter logic" value={logic} onChange={(event) => setLogic(event.target.value as 'and' | 'or')}><option value="and">Match all</option><option value="or">Match any</option></select>
+                      : <span className="filter-join">{logic.toUpperCase()}</span>}
+                    <select aria-label={`Filter field ${index + 1}`} value={item.column} onChange={(event) => setConditionColumn(index, event.target.value)}><option value="">Choose a field…</option>{dataset.schema.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}</select>
+                    <select aria-label={`Filter operator ${index + 1}`} value={item.operator} onChange={(event) => updateCondition(index, { operator: event.target.value, value: '' })}>{(operators[columnType] ?? operators.text).map((operator) => <option value={operator} key={operator}>{labels[operator]}</option>)}</select>
+                    {!noValue.has(item.operator) && (item.operator === 'between'
+                      ? <span className="between-inputs">
+                        <input aria-label={`Filter lower value ${index + 1}`} type={valueType} value={Array.isArray(item.value) ? String(item.value[0] ?? '') : ''} onChange={(event) => updateCondition(index, { value: [event.target.value, Array.isArray(item.value) ? item.value[1] ?? '' : ''] })} />
+                        <span>and</span>
+                        <input aria-label={`Filter upper value ${index + 1}`} type={valueType} value={Array.isArray(item.value) ? String(item.value[1] ?? '') : ''} onChange={(event) => updateCondition(index, { value: [Array.isArray(item.value) ? item.value[0] ?? '' : '', event.target.value] })} />
+                      </span>
+                      : columnType === 'boolean'
+                        ? <select aria-label={`Filter value ${index + 1}`} value={String(item.value ?? '')} onChange={(event) => updateCondition(index, { value: event.target.value })}><option value="">Choose…</option><option value="true">True</option><option value="false">False</option></select>
+                        : <input aria-label={`Filter value ${index + 1}`} type={valueType} value={String(item.value ?? '')} placeholder="Enter a value" onChange={(event) => updateCondition(index, { value: event.target.value })} />)}
+                    {conditions.length > 1 && <button className="remove-condition" aria-label="Remove condition" onClick={() => setConditions(conditions.filter((_, row) => row !== index))}>×</button>}
+                  </div>
+                })}
+                <div className="filter-actions"><button className="text-button" onClick={() => setConditions([...conditions, { type: 'condition', column: '', operator: 'contains', value: '' }])}>＋ Add condition</button><button className="button primary small" onClick={applyFilter} disabled={!conditions.some((item) => item.column)}>Apply filter</button></div>
+                {activeFilter && <div className="active-filter">{activeFilter.conditions.map((entry, index) => {
+                  const active = entry as FilterCondition
+                  return <span className="filter-chip" key={`${active.column}-${index}`}><b>{active.column}</b> {labels[active.operator]} {!noValue.has(active.operator) && <b>{Array.isArray(active.value) ? active.value.join(' – ') : String(active.value ?? '')}</b>}<button aria-label={`Remove ${active.column} filter`} onClick={() => {
+                    const remaining = activeFilter.conditions.filter((_, row) => row !== index)
+                    setActiveFilter(remaining.length ? { ...activeFilter, conditions: remaining } : null)
+                  }}>×</button></span>
+                })}<button className="text-button" onClick={() => setActiveFilter(null)}>Clear filter</button></div>}
+                <div className="filter-footer"><span>AND/OR logic is evaluated by the database against the full dataset.</span><button className="text-button" disabled={!activeFilter} onClick={() => openSave('filter')}>Save filter</button></div>
+              </div>}
 
-            <section className="view-editor">
-              <div><strong>Save table view</strong><p>Keep your visible columns and sort order ready for next time.</p></div>
-              <input aria-label="Table view name" placeholder="Name this table view…" value={tableName} onChange={(event) => setTableName(event.target.value)} />
-              <button className="secondary small" disabled={!tableName.trim()} onClick={() => void saveConfiguration('table', tableName, { visibleColumns, sortBy, sortDirection }, activeConfig.table || undefined)}>{activeConfig.table ? 'Update view' : 'Save table view'}</button>
-              {activeConfig.table && <button className="text-button" disabled={!tableName.trim()} onClick={() => void saveConfiguration('table', tableName, { visibleColumns, sortBy, sortDirection })}>Save as new</button>}
+              <div className="table-tools">
+                <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Search all records…" aria-label="Search all records" /></label>
+                {activeFilter && <button className="filter-chip applied-chip" onClick={() => setActiveFilter(null)}>Filter applied <span>×</span></button>}
+                <div className="table-tool-end"><button className="text-button" onClick={() => openSave('table')}>Save view</button></div>
+              </div>
+
+              <div className="table-scroll">
+                <table>
+                  <thead><tr><th className="row-number">#</th>{visibleSchema.map((column) => <th key={column.name}><button onClick={() => { setSortBy(column.name); setSortDir(sortBy === column.name && sortDir === 'asc' ? 'desc' : 'asc') }}>{column.name}<span>{sortBy === column.name ? sortDir === 'asc' ? ' ↑' : ' ↓' : ' ↕'}</span></button></th>)}</tr></thead>
+                  <tbody>
+                    {rows.map((row, index) => <tr key={row._record_id} onClick={() => openRecord(row)}>
+                      <td className="row-number">{(page - 1) * 50 + index + 1}</td>
+                      {visibleSchema.map((column) => <td key={column.name} title={displayValue(row[column.name])}>{displayValue(row[column.name])}</td>)}
+                    </tr>)}
+                    {rows.length === 0 && <tr><td colSpan={visibleSchema.length + 1} className="empty-table">{total === 0 ? 'No records match. Try a different search or filter.' : 'Loading records…'}</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              <footer className="table-footer"><span>Showing {total ? (page - 1) * 50 + 1 : 0}–{Math.min(page * 50, total)} of {total.toLocaleString()} records</span><div className="pagination"><button disabled={page <= 1} aria-label="Previous page" onClick={() => setPage(page - 1)}>←</button><span>Page <b>{page}</b> of {pageCount}</span><button disabled={page >= pageCount} aria-label="Next page" onClick={() => setPage(page + 1)}>→</button></div></footer>
             </section>
-
-            <section className="view-editor detail-editor">
-              <div><strong>Record detail layout</strong><p>Choose the fields and labels shown when you open a record.</p></div>
-              <input aria-label="Detail layout name" placeholder="Name this layout…" value={detailName} onChange={(event) => setDetailName(event.target.value)} />
-              <input aria-label="Detail section name" placeholder="Section name" value={detailSection} onChange={(event) => setDetailSection(event.target.value)} />
-              <select aria-label="Detail layout columns" value={detailColumns} onChange={(event) => setDetailColumns(Number(event.target.value) as 1 | 2)}><option value={1}>One column</option><option value={2}>Two columns</option></select>
-              <button className="secondary small" disabled={!detailName.trim()} onClick={() => void saveConfiguration('detail', detailName, { fields: detailFields, labels: detailLabels, section: detailSection, columns: detailColumns }, activeConfig.detail || undefined)}>{activeConfig.detail ? 'Update layout' : 'Save layout'}</button>
-              {activeConfig.detail && <button className="text-button" disabled={!detailName.trim()} onClick={() => void saveConfiguration('detail', detailName, { fields: detailFields, labels: detailLabels, section: detailSection, columns: detailColumns })}>Save as new</button>}
-              <div className="detail-field-editor">{selected.columns.map((column) => <div className="detail-field-option" key={column.name}><label><input type="checkbox" checked={detailFields.includes(column.name)} onChange={(event) => setDetailFields((items) => event.target.checked ? [...items, column.name] : items.filter((item) => item !== column.name))} /><span>{column.name}</span></label><span className="field-order"><button aria-label={`Move ${column.name} earlier`} disabled={!detailFields.includes(column.name) || detailFields.indexOf(column.name) === 0} onClick={() => moveDetailField(column.name, -1)}>↑</button><button aria-label={`Move ${column.name} later`} disabled={!detailFields.includes(column.name) || detailFields.indexOf(column.name) === detailFields.length - 1} onClick={() => moveDetailField(column.name, 1)}>↓</button></span><input aria-label={`Display label for ${column.name}`} placeholder={column.name} value={detailLabels[column.name] ?? ''} onChange={(event) => setDetailLabels((labels) => ({ ...labels, [column.name]: event.target.value }))} /></div>)}<button className="text-button" onClick={() => { setDetailFields(selected.columns.map((column) => column.name)); setDetailLabels({}); setDetailSection('Record details'); setDetailColumns(2); loadConfiguration('detail', '') }}>Restore defaults</button></div>
-            </section>
-          </div>
+          </>
+        ) : (
+          <section className="welcome">
+            <div className="welcome-mark">▤</div><div className="eyebrow">YOUR LOCAL DATA WORKSPACE</div><h1>Bring your data<br />together.</h1>
+            <p>Import a spreadsheet to start exploring your data in one calm, private workspace.</p>
+            <button className="button primary" onClick={() => { setError(''); setModal('import') }}>＋ Import your first dataset</button>
+            <div className="welcome-note"><span>✓</span> Your files stay on this device</div>
+          </section>
         )}
       </main>
 
-      {(record || creating) && selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDetail() }}>
-        <section className="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detail-title">
-          <header><div><p className="eyebrow">{creating ? 'NEW RECORD' : 'RECORD DETAILS'}</p><h2 id="detail-title">{creating ? 'Add a record' : 'Record'}</h2></div><button className="icon-button" aria-label="Close details" onClick={closeDetail}>×</button></header>
-          {!creating && <div className="detail-section-heading"><strong>{detailSection}</strong><span>{detailColumns === 2 ? 'Two columns' : 'One column'}</span><div className="record-navigation"><button className="text-button" onClick={() => navigateRecord(-1)} disabled={!result || result.records.findIndex((item) => item._record_id === record?._record_id) <= 0}>Previous</button><button className="text-button" onClick={() => navigateRecord(1)} disabled={!result || result.records.findIndex((item) => item._record_id === record?._record_id) >= result.records.length - 1}>Next</button></div></div>}
-          <div className={`detail-fields columns-${detailColumns}`}>{(creating ? selected.columns : detailFields.map((name) => selected.columns.find((column) => column.name === name)).filter((column): column is Column => column !== undefined)).map((column) => <label className="detail-field" key={column.name}><span>{detailLabels[column.name] || column.name}<small>{column.type.toLowerCase()}</small></span>{editing || creating ? renderEditor(column, draftRecord[column.name], (value) => setDraftRecord((current) => ({ ...current, [column.name]: value }))) : <output>{showValue(record?.[column.name])}</output>}</label>)}</div>
-          <footer>
-            {!creating && !editing && <button className="text-button danger" onClick={() => void deleteRecord()}>Delete record</button>}
-            <span className="panel-spacer" />
-            <button className="secondary" onClick={closeDetail}>{editing || creating ? 'Cancel' : 'Close'}</button>
-            {editing || creating ? <button className="primary" onClick={() => void saveRecord()}>Save record</button> : <button className="primary" onClick={() => { setEditing(true); setDraftRecord(Object.fromEntries(selected.columns.map((column) => [column.name, record?.[column.name]]))) }}>Edit record</button>}
-          </footer>
-        </section>
+      {selectedRecord && <div className="drawer-backdrop" onClick={() => { if (editing && !window.confirm('Discard unsaved changes?')) return; setSelectedRecord(null); setEditing(false) }}>
+        <aside className="record-drawer" onClick={(event) => event.stopPropagation()} aria-label="Record details">
+          <header><div><div className="eyebrow">RECORD DETAILS</div><h2>{recordIsNew ? 'New record' : `Record ${(page - 1) * 50 + rows.findIndex((item) => item._record_id === selectedRecord._record_id) + 1}`}</h2></div><button className="close-button" aria-label="Close details" onClick={() => { if (editing && !window.confirm('Discard unsaved changes?')) return; setSelectedRecord(null); setEditing(false) }}>×</button></header>
+          <div className="drawer-toolbar">{!editing && <><button className="button secondary" onClick={() => { setEditing(true); setRecordIsNew(false) }}>✎ Edit record</button><button className="button danger" onClick={removeSelectedRecord}>Delete</button></>}<select aria-label="Load detail layout" defaultValue="" onChange={(event) => { const config = detailConfigurations.find((item) => item.id === event.target.value); if (config) loadConfiguration(config); event.target.value = '' }}><option value="">Detail layout</option>{detailConfigurations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>
+          {editing ? <div className="record-fields">{dataset?.schema.map((column) => <label key={column.name}><span>{column.name}<small>{column.type}</small></span><input value={recordValues[column.name] ?? ''} onChange={(event) => setRecordValues({ ...recordValues, [column.name]: event.target.value })} /></label>)}</div> :
+            <div className="record-fields">{Array.from(new Set(layout.filter((field) => field.visible && selectedRecord[field.name] !== undefined).map((field) => field.section || 'Record'))).map((section) => <section className="detail-section" key={section}><h3>{section}</h3>{layout.filter((field) => field.visible && selectedRecord[field.name] !== undefined && (field.section || 'Record') === section).map((field) => <div className="record-value" key={field.name}><span>{field.label || field.name}</span><p>{displayValue(selectedRecord[field.name])}</p></div>)}</section>)}</div>}
+          {layoutOpen && <div className="layout-editor"><div className="popover-heading">Customize record layout</div>{layout.map((field, index) => <div className="layout-row" key={field.name}><label><input type="checkbox" checked={field.visible} onChange={(event) => setLayout(layout.map((item) => item.name === field.name ? { ...item, visible: event.target.checked } : item))} /><input aria-label={`Label for ${field.name}`} value={field.label} onChange={(event) => setLayout(layout.map((item) => item.name === field.name ? { ...item, label: event.target.value } : item))} /></label><input aria-label={`Section for ${field.name}`} value={field.section} onChange={(event) => setLayout(layout.map((item) => item.name === field.name ? { ...item, section: event.target.value } : item))} placeholder="Section" /><span><button aria-label="Move field up" disabled={index === 0} onClick={() => { const next = [...layout]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; setLayout(next) }}>↑</button><button aria-label="Move field down" disabled={index === layout.length - 1} onClick={() => { const next = [...layout]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; setLayout(next) }}>↓</button></span></div>)}<button className="button secondary full" onClick={() => openSave('detail')}>Save detail layout</button></div>}
+          <div className="drawer-footer">{editing ? <><button className="button secondary" onClick={() => { setEditing(false); if (recordIsNew) setSelectedRecord(null) }}>Cancel</button><button className="button primary" onClick={saveRecord}>Save record</button></> : <button className="text-button" onClick={() => setLayoutOpen(!layoutOpen)}>{layoutOpen ? 'Close layout editor' : 'Customize layout'}</button>}</div>
+        </aside>
       </div>}
 
-      {showImport && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowImport(false) }}>
-        <section className="import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title">
-          <header><div><p className="eyebrow">ADD A SOURCE</p><h2 id="import-title">Import a file</h2><p>Bring a CSV or Excel spreadsheet into your local workspace.</p></div><button className="icon-button" aria-label="Close import" onClick={() => setShowImport(false)}>×</button></header>
-          <label className="file-drop"><span className="upload-icon">↑</span><strong>{file?.name ?? 'Choose a CSV or Excel file'}</strong><small>CSV or XLSX · Maximum 25 MB</small><input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(event) => void selectFile(event.target.files?.[0] ?? null)} /></label>
-          {preview && <div className="preview-summary"><strong>Preview</strong><span>{preview.row_count.toLocaleString()} records · {preview.columns.length} columns</span></div>}
-          {preview && preview.sheets.length > 0 && <label className="field-label">Worksheet<select value={sheet} onChange={(event) => void changeSheet(event.target.value)}>{preview.sheets.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}
-          {preview && <div className="preview-table"><table><thead><tr>{preview.columns.map((column) => <th key={column.name}>{column.name}<small>{column.type}</small></th>)}</tr></thead><tbody>{preview.preview.slice(0, 5).map((row, index) => <tr key={index}>{preview.columns.map((column) => <td key={column.name}>{showValue(row[column.name])}</td>)}</tr>)}</tbody></table></div>}
-          <div className="import-fields"><label className="field-label">Dataset name<input value={importName} onChange={(event) => setImportName(event.target.value)} placeholder="e.g. Quarterly sales" maxLength={120} /></label><label className="field-label">Description <span className="optional">optional</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="A note about this dataset" maxLength={500} /></label></div>
-          <footer><button className="secondary" onClick={() => setShowImport(false)}>Cancel</button><button className="primary" disabled={!file || !preview || !importName.trim() || loading} onClick={() => void importFile()}>{loading ? 'Importing…' : 'Import dataset'}</button></footer>
-        </section>
-      </div>}
-
-      {(message || error) && <div className={`toast ${error ? 'toast-error' : ''}`} role={error ? 'alert' : 'status'}><span>{error || message}</span><button aria-label="Dismiss message" onClick={() => { setError(''); setMessage('') }}>×</button></div>}
+      {modal && <div className="modal-backdrop" onClick={() => !busy && setModal(null)}><section className="modal" onClick={(event) => event.stopPropagation()} aria-label={modal === 'import' ? 'Import data' : modal === 'manage' ? 'Manage saved configurations' : 'Save configuration'}>
+        <header><div><div className="eyebrow">{modal === 'import' ? 'ADD A DATA SOURCE' : modal === 'manage' ? 'CONFIGURATIONS' : 'SAVE FOR LATER'}</div><h2>{modal === 'import' ? 'Import a spreadsheet' : modal === 'manage' ? 'Manage saved' : `${savePurpose === 'rename' ? 'Rename' : savePurpose === 'update' ? 'Update' : savePurpose === 'duplicate' ? 'Duplicate' : 'Save'} ${saveKind === 'filter' ? 'filter' : saveKind === 'table' ? 'table view' : 'detail layout'}`}</h2></div><button className="close-button" onClick={() => setModal(null)}>×</button></header>
+        {error && <div className="notice error-notice modal-error" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
+        {modal === 'import' ? <div className="modal-content">
+          <label className="field-label">Choose a CSV or Excel file
+            <input type="file" accept=".csv,.xlsx" onChange={(event) => { const file = event.target.files?.[0]; if (file) handleFile(file) }} />
+          </label>
+          {busy && <div className="inline-status">Reading spreadsheet…</div>}
+          {preview && <>
+            {preview.worksheets.length > 0 && <label className="field-label">Worksheet<select value={worksheet} onChange={(event) => { setWorksheet(event.target.value); if (importFile) { setBusy(true); uploadPreview(importFile, event.target.value).catch((cause) => setError(message(cause))).finally(() => setBusy(false)) } }}><option value="">First worksheet</option>{preview.worksheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}</select></label>}
+            <label className="field-label">Dataset name<input value={importName} maxLength={120} onChange={(event) => setImportName(event.target.value)} /></label>
+            <label className="field-label">Description <span className="optional">Optional</span><textarea value={importDescription} maxLength={1000} onChange={(event) => setImportDescription(event.target.value)} /></label>
+            <div className="preview-summary">{preview.row_count.toLocaleString()} records · {preview.headers.length} fields</div>
+            <div className="preview-scroll"><table><thead><tr>{preview.headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{preview.rows.slice(0, 5).map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{displayValue(value)}</td>)}</tr>)}</tbody></table></div>
+          </>}
+          <footer><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={!preview || preview.headers.length === 0 || !importName.trim() || busy} onClick={importDataset}>{busy ? 'Importing…' : 'Import dataset'}</button></footer>
+        </div> : modal === 'manage' ? <div className="modal-content">
+          {configurations.length === 0 ? <p className="save-explainer">No saved configurations for this dataset yet.</p> : configurations.map((configuration) => <div className="managed-config" key={configuration.id}>
+            <div><strong>{configuration.name}</strong><span>{configuration.kind === 'filter' ? 'Filter' : configuration.kind === 'table' ? 'Table view' : 'Detail layout'}</span></div>
+            <button className="text-button" onClick={() => { loadConfiguration(configuration); setModal(null) }}>Load</button>
+            <button className="text-button" onClick={() => { loadConfiguration(configuration); editSavedConfiguration(configuration, 'update') }}>Update</button>
+            <button className="text-button" onClick={() => editSavedConfiguration(configuration, 'rename')}>Rename</button>
+            <button className="text-button" onClick={() => editSavedConfiguration(configuration, 'duplicate')}>Duplicate</button>
+            <button className="text-button delete-config" onClick={() => deleteConfig(configuration)}>Delete</button>
+          </div>)}
+          <footer><button className="button secondary" onClick={() => setModal(null)}>Done</button></footer>
+        </div> : <div className="modal-content">
+          <label className="field-label">Name<input autoFocus maxLength={120} placeholder="e.g. High priority customers" value={saveName} onChange={(event) => setSaveName(event.target.value)} /></label>
+          <p className="save-explainer">{saveKind === 'filter' ? 'This saves the current filter independently of your table layout.' : saveKind === 'table' ? 'This saves visible columns, order, and sorting for this dataset.' : 'This saves visible fields, labels, sections, and order.'}</p>
+          <footer><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={!saveName.trim() || busy} onClick={saveConfig}>{savePurpose === 'rename' ? 'Rename configuration' : savePurpose === 'update' ? 'Update configuration' : savePurpose === 'duplicate' ? 'Create duplicate' : 'Save configuration'}</button></footer>
+        </div>}
+      </section></div>}
     </div>
   )
 }
