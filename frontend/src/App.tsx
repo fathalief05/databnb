@@ -50,6 +50,9 @@ function App() {
   const [recordIsNew, setRecordIsNew] = useState(false)
   const [visibleColumns, setVisibleColumns] = useState<string[]>([])
   const [columnOpen, setColumnOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportScope, setExportScope] = useState<'all' | 'filtered'>('all')
+  const [exportVisibleOnly, setExportVisibleOnly] = useState(false)
   const [layoutOpen, setLayoutOpen] = useState(false)
   const [layout, setLayout] = useState<Array<{ name: string; label: string; section: string; visible: boolean }>>([])
   const [modal, setModal] = useState<'import' | 'save' | 'manage' | null>(null)
@@ -262,9 +265,10 @@ function App() {
     } catch (cause) { setError(message(cause)) }
   }
 
-  function exportData(format: 'csv' | 'xlsx') {
-    const query = new URLSearchParams({ format, scope: activeFilter || search ? 'filtered' : 'all', search })
+  function exportData(format: 'csv' | 'xlsx', scope: 'all' | 'filtered') {
+    const query = new URLSearchParams({ format, scope, search: scope === 'filtered' ? search : '' })
     if (activeFilter) query.set('filters', JSON.stringify(activeFilter))
+    if (exportVisibleOnly) query.set('columns', JSON.stringify(visibleColumns))
     const url = `${import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api'}/datasets/${datasetId}/export?${query}`
     window.open(url, '_blank', 'noopener,noreferrer')
   }
@@ -330,7 +334,7 @@ function App() {
         <a className="brand" href="#" aria-label="DataBNB home">
           <span className="brand-mark">d</span><span>data<span className="brand-light">bnb</span></span>
         </a>
-        <div className="side-section-title">WORKSPACE <span>⌄</span></div>
+        <div className="side-section-title">WORKSPACE</div>
         <div className="side-label">YOUR DATASETS <span>{datasets.length}</span></div>
         <nav className="dataset-nav" aria-label="Datasets">
           {datasets.map((item) => (
@@ -351,7 +355,7 @@ function App() {
       <main className="main">
         <header className="topbar">
           <div className="breadcrumb"><span>Workspace</span><b>/</b><strong>{dataset?.name ?? 'Overview'}</strong></div>
-          <div className="topbar-right"><span className="local-badge"><i /> Local only</span><button className="avatar" title="Local workspace">F</button></div>
+          <div className="topbar-right"><span className="local-badge"><i /> Local only</span><span className="avatar" aria-label="Local workspace">F</span></div>
         </header>
 
         {error && !modal && <div className="notice error-notice" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
@@ -364,11 +368,19 @@ function App() {
                 <div className="eyebrow"><span className="source-dot" /> SPREADSHEET · {dataset.source_filename}</div>
                 <h1>{dataset.name}</h1>
                 <p>{dataset.description || 'Your imported data, ready to explore.'}</p>
-                <div className="dataset-stats"><span><b>{dataset.row_count.toLocaleString()}</b> records</span><span className="stat-divider" /><span><b>{dataset.schema.length}</b> fields</span><span className="stat-divider" /><span>Updated just now</span></div>
+                <div className="dataset-stats"><span><b>{dataset.row_count.toLocaleString()}</b> records</span><span className="stat-divider" /><span><b>{dataset.schema.length}</b> fields</span></div>
               </div>
               <div className="heading-actions">
-                <button className="button secondary" onClick={() => exportData('csv')} title="Download all records or the filtered results as CSV">↓ Export CSV</button>
-                <button className="button secondary" onClick={() => exportData('xlsx')} title="Download all records or the filtered results as Excel">↓ Export Excel</button>
+                <div className="relative">
+                  <button className="button secondary" onClick={() => setExportOpen(!exportOpen)}>↓ Export data</button>
+                  {exportOpen && <div className="popover export-popover">
+                    <div className="popover-heading">Choose export scope</div>
+                    <label className="export-option"><input type="radio" name="export-scope" checked={exportScope === 'all'} onChange={() => setExportScope('all')} /><span>Full dataset<small>{dataset.row_count.toLocaleString()} records</small></span></label>
+                    <label className="export-option"><input type="radio" name="export-scope" checked={exportScope === 'filtered'} onChange={() => setExportScope('filtered')} /><span>Filtered results<small>{total.toLocaleString()} matching records</small></span></label>
+                    <label className="export-visible"><input type="checkbox" checked={exportVisibleOnly} onChange={(event) => setExportVisibleOnly(event.target.checked)} /> Only visible columns</label>
+                    <div className="export-buttons"><button className="button secondary" disabled={exportVisibleOnly && visibleColumns.length === 0} onClick={() => { exportData('csv', exportScope); setExportOpen(false) }}>Download CSV</button><button className="button primary" disabled={exportVisibleOnly && visibleColumns.length === 0} onClick={() => { exportData('xlsx', exportScope); setExportOpen(false) }}>Download Excel</button></div>
+                  </div>}
+                </div>
                 <button className="button primary" onClick={() => openRecord({} as RecordRow, true)}>＋ Add record</button>
               </div>
             </section>
@@ -439,7 +451,7 @@ function App() {
               </div>}
 
               <div className="table-tools">
-                <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Search all records…" aria-label="Search all records" /><kbd>⌘ K</kbd></label>
+                <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Search all records…" aria-label="Search all records" /></label>
                 {activeFilter && <button className="filter-chip applied-chip" onClick={() => setActiveFilter(null)}>Filter applied <span>×</span></button>}
                 <div className="table-tool-end"><button className="text-button" onClick={() => openSave('table')}>Save view</button></div>
               </div>
@@ -495,7 +507,7 @@ function App() {
             <div className="preview-summary">{preview.row_count.toLocaleString()} records · {preview.headers.length} fields</div>
             <div className="preview-scroll"><table><thead><tr>{preview.headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{preview.rows.slice(0, 5).map((row, index) => <tr key={index}>{row.map((value, cell) => <td key={cell}>{displayValue(value)}</td>)}</tr>)}</tbody></table></div>
           </>}
-          <footer><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={!preview || !importName.trim() || busy} onClick={importDataset}>{busy ? 'Importing…' : 'Import dataset'}</button></footer>
+          <footer><button className="button secondary" onClick={() => setModal(null)}>Cancel</button><button className="button primary" disabled={!preview || preview.headers.length === 0 || !importName.trim() || busy} onClick={importDataset}>{busy ? 'Importing…' : 'Import dataset'}</button></footer>
         </div> : modal === 'manage' ? <div className="modal-content">
           {configurations.length === 0 ? <p className="save-explainer">No saved configurations for this dataset yet.</p> : configurations.map((configuration) => <div className="managed-config" key={configuration.id}>
             <div><strong>{configuration.name}</strong><span>{configuration.kind === 'filter' ? 'Filter' : configuration.kind === 'table' ? 'Table view' : 'Detail layout'}</span></div>

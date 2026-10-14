@@ -49,6 +49,24 @@ def _decode_filters(value: str | None):
     return parsed
 
 
+def _decode_columns(value: str | None):
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value) if value.lstrip().startswith("[") else value.split(",")
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="Columns must be a JSON array of names.") from error
+    if not isinstance(parsed, list) or not all(isinstance(column, str) for column in parsed):
+        raise HTTPException(status_code=422, detail="Columns must be a list of field names.")
+    return parsed
+
+
+def _safe_upload_name(filename: str | None) -> str:
+    name = (filename or "upload.csv").replace("\\", "/").split("/")[-1]
+    name = "".join(character for character in name if character.isprintable())
+    return name[:255] or "upload.csv"
+
+
 @router.get("/health")
 def health():
     return {"status": "ok"}
@@ -62,7 +80,7 @@ def datasets():
 @router.post("/imports/preview")
 async def preview_import(file: UploadFile = File(...), worksheet: str | None = Form(default=None)):
     data = await file.read(25 * 1024 * 1024 + 1)
-    headers, rows, worksheets = read_spreadsheet(file.filename or "upload.csv", data, worksheet)
+    headers, rows, worksheets = read_spreadsheet(_safe_upload_name(file.filename), data, worksheet)
     return {
         "headers": headers,
         "schema": infer_schema(headers, rows),
@@ -80,11 +98,12 @@ async def create_import(
     worksheet: str | None = Form(default=None),
 ):
     data = await file.read(25 * 1024 * 1024 + 1)
-    headers, rows, _ = read_spreadsheet(file.filename or "upload.csv", data, worksheet)
+    filename = _safe_upload_name(file.filename)
+    headers, rows, _ = read_spreadsheet(filename, data, worksheet)
     return import_dataset(
         name,
         description,
-        file.filename or "upload.csv",
+        filename,
         headers,
         rows,
         "spreadsheet",
@@ -164,7 +183,7 @@ def export(
         raise HTTPException(status_code=422, detail="Export format must be csv or xlsx.")
     if scope not in {"all", "filtered"}:
         raise HTTPException(status_code=422, detail="Export scope must be all or filtered.")
-    selected_columns = [column for column in columns.split(",") if column] if columns else None
+    selected_columns = _decode_columns(columns)
     body, media_type, extension = export_records(
         dataset_id,
         search,

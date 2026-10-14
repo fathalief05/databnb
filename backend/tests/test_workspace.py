@@ -122,7 +122,7 @@ def test_record_crud_saved_configurations_and_exports(client):
     })
     exported = client.get(
         f"/api/datasets/{dataset_id}/export",
-        params={"format": "csv", "scope": "filtered", "filters": filters, "columns": "Name,Amount"},
+        params={"format": "csv", "scope": "filtered", "filters": filters, "columns": '["Name","Amount"]'},
     )
     assert exported.status_code == 200
     rows = list(csv.reader(io.StringIO(exported.content.decode("utf-8-sig"))))
@@ -130,6 +130,10 @@ def test_record_crud_saved_configurations_and_exports(client):
     workbook = client.get(f"/api/datasets/{dataset_id}/export", params={"format": "xlsx"})
     assert workbook.status_code == 200
     assert workbook.headers["content-type"].startswith("application/vnd.openxmlformats")
+    assert client.get(
+        f"/api/datasets/{dataset_id}/export",
+        params={"format": "csv", "columns": "[]"},
+    ).status_code == 422
 
     assert client.delete(f"/api/datasets/{dataset_id}/records/{record_id}").json() == {"deleted": True}
 
@@ -175,3 +179,18 @@ def test_uploaded_file_validation(client):
         files={"file": ("bad.csv", b'a,b\n"unclosed,value', "text/csv")},
     )
     assert malformed.status_code == 400
+    too_many_cells = client.post(
+        "/api/imports/preview",
+        files={"file": ("wide.csv", b"a,b\n1,2,3\n", "text/csv")},
+    )
+    assert too_many_cells.status_code == 400
+
+
+def test_upload_filename_is_stored_without_client_path(client):
+    response = client.post(
+        "/api/imports",
+        files={"file": ("..\\private\\sample.csv", b"Name\nAda\n", "text/csv")},
+        data={"name": "Safe filename"},
+    )
+    assert response.status_code == 200, response.text
+    assert client.get("/api/datasets").json()[0]["source_filename"] == "sample.csv"

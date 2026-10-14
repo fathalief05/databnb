@@ -9,7 +9,7 @@
 - Search, sort, filter with AND/OR conditions, and paginate on the server.
 - Save filters, table views (visible columns, order, and sort), and record detail layouts independently.
 - Add, edit, and delete records; inspect and customize record fields.
-- Export the full dataset or the current filtered result to CSV or XLSX.
+- Export the full dataset or the current filtered result to CSV or XLSX, with an option to include only visible columns.
 - Use a local React/TypeScript interface and FastAPI API without Docker or a remote service.
 
 This first version imports local copies of spreadsheets. It does not connect to live databases or APIs, implement joins, or offer multi-user access.
@@ -86,4 +86,4 @@ This is a local, single-user application, not a multi-user transactional server.
 
 ## Current limitations and roadmap
 
-This MVP establishes the spreadsheet import/query workflow and separate saved filter, table, and detail configurations. It does not yet provide live database/API connectors, dataset joins, bulk selection, multi-level visual filter groups, configuration rename/duplicate management, or migrations between released versions. Additional connectors can implement the same import/preview/query boundary without changing dataset identity or the workspace model.
+This MVP establishes the spreadsheet import/query workflow and separate saved filter, table, and detail configurations, including rename, duplicate, update, and delete actions. It does not yet provide live database/API connectors, dataset joins, bulk selection, nested visual filter editing, preferred defaults, or migrations between released versions. Additional connectors can implement the same import/preview/query boundary without changing dataset identity or the workspace model.

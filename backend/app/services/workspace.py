@@ -65,6 +65,8 @@ def list_datasets():
 
 
 def import_dataset(name: str, description: str, filename: str, headers: list[str], rows: list[list[Any]], source_type: str):
+    if not name.strip():
+        raise HTTPException(status_code=422, detail="Dataset names cannot be empty.")
     if not headers:
         raise HTTPException(status_code=400, detail="The selected sheet does not contain a header row.")
     schema = infer_schema(headers, rows)
@@ -246,6 +248,8 @@ def _where(dataset, search: str, filters: dict | None, params: list) -> str:
 def query_records(dataset_id: str, page: int, page_size: int, search: str, sort_by: str | None, sort_dir: str, filters: dict | None):
     page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
+    if sort_dir.lower() not in {"asc", "desc"}:
+        raise HTTPException(status_code=422, detail="Sort direction must be asc or desc.")
     with DB_LOCK:
         connection = connect()
         try:
@@ -447,7 +451,9 @@ def export_records(dataset_id: str, search: str, filters: dict | None, selected_
         connection = connect()
         try:
             dataset = _dataset(connection, dataset_id)
-            columns = selected_columns or [item["name"] for item in dataset["schema"]]
+            if selected_columns is not None and not selected_columns:
+                raise HTTPException(status_code=422, detail="Select at least one column to export.")
+            columns = selected_columns if selected_columns is not None else [item["name"] for item in dataset["schema"]]
             for name in columns:
                 _column(dataset, name)
             params: list[Any] = []
